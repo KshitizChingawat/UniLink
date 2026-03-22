@@ -64,7 +64,10 @@ const SettingsPage = () => {
   }, [user?.id]);
 
   useEffect(() => {
-    document.documentElement.classList.toggle('dark', preferences.darkModeEnabled);
+    // Only apply dark mode when logged in (token present) — never affect login/register pages
+    if (localStorage.getItem('auth_token')) {
+      document.documentElement.classList.toggle('dark', preferences.darkModeEnabled);
+    }
   }, [preferences.darkModeEnabled]);
 
   useEffect(() => {

@@ -13,9 +13,21 @@ import { createId, ensureDataDirs, loadDb, saveDb } from "./storage.js";
 import type { AiSuggestionRecord, BluetoothDeviceRecord, ClipboardRecord, DeviceRecord, FileTransferRecord, PairSessionRecord, UserRecord, VaultRecord } from "./types.js";
 const app = express();
 app.use(cors({
-    origin: "*",
-  methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
-  allowedHeaders: ["Content-Type", "Authorization"]
+  origin: "*",
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-File-Name",
+    "X-File-Size",
+    "X-File-Type",
+    "X-Sender-Device-Id",
+    "X-Receiver-Device-Id",
+    "X-Transfer-Method",
+  ],
+  exposedHeaders: ["Content-Disposition"],
+  preflightContinue: false,
+  optionsSuccessStatus: 204,
 }));
 const port = Number(process.env.PORT || 8787);
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 25, standardHeaders: true, legacyHeaders: false });
@@ -28,8 +40,15 @@ app.use(
     crossOriginResourcePolicy: false,
   }),
 );
-app.use(express.json({ limit: "160mb" }));
-app.use(express.urlencoded({ extended: true, limit: "160mb" }));
+// Skip body parsing for the binary file upload route — it reads req stream directly
+app.use((req, res, next) => {
+  if (req.path === "/api/file-transfers/upload") return next();
+  express.json({ limit: "160mb" })(req, res, next);
+});
+app.use((req, res, next) => {
+  if (req.path === "/api/file-transfers/upload") return next();
+  express.urlencoded({ extended: true, limit: "160mb" })(req, res, next);
+});
 
 const registerSchema = z.object({
   email: z.string().trim().email().max(120),
