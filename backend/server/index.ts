@@ -13,7 +13,7 @@ import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
 import { nowIso, safeJoinUploadPath, sanitizeFilename } from "./helpers.js";
 import { createId, ensureDataDirs, getUploadDir, loadDb, saveDb } from "./storage.js";
 import type { AiSuggestionRecord, BluetoothDeviceRecord, ClipboardRecord, DeviceRecord, FileTransferRecord, PairSessionRecord, UserRecord, VaultRecord } from "./types.js";
-
+const sessionFiles: Record<string, string> = {};
 const app = express();
 app.use(cors({
     origin: "*",
