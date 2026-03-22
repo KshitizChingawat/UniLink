@@ -1151,6 +1151,34 @@ app.delete("/api/file-transfers/:id", requireAuth, async (req: AuthenticatedRequ
   res.status(204).send();
 });
 
+// 🔥 REAL-TIME FILE TRANSFER (SESSION BASED)
+
+app.post("/api/send", (req, res) => {
+  const { sessionId, file } = req.body;
+
+  if (!sessionId || !file) {
+    return res.status(400).json({ error: "Missing sessionId or file" });
+  }
+
+  sessionFiles[sessionId] = file;
+
+  res.json({ success: true });
+});
+
+app.get("/api/receive/:sessionId", (req, res) => {
+  const { sessionId } = req.params;
+
+  const file = sessionFiles[sessionId];
+
+  if (!file) {
+    return res.status(404).json({ error: "No file yet" });
+  }
+
+  res.json({ file });
+
+  delete sessionFiles[sessionId];
+});
+
 ensureDataDirs()
   .then(() => {
     app.listen(port, () => {
