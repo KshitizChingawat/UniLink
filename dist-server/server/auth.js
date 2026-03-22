@@ -13,6 +13,9 @@ export const sanitizeUser = (user) => ({
     email: user.email,
     firstName: user.firstName,
     lastName: user.lastName,
+    plan: user.plan,
+    subscriptionStartedAt: user.subscriptionStartedAt,
+    subscriptionExpiresAt: user.subscriptionExpiresAt,
 });
 export const requireAuth = (req, res, next) => {
     const header = req.headers.authorization;

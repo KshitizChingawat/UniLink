@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from './useAuth';
 import { toast } from 'sonner';
+import { BASE_URL } from '@/lib/api';
 
 export interface AISuggestion {
   id: string;
@@ -28,7 +29,7 @@ export const useAIAssistant = () => {
     if (!token) return;
 
     try {
-      const response = await fetch('/api/ai-suggestions', {
+      const response = await fetch(`${BASE_URL}/api/ai-suggestions`, {
         headers: {
           'Authorization': `Bearer ${token}`
         }
@@ -57,7 +58,7 @@ export const useAIAssistant = () => {
     try {
       setLoading(true);
 
-      const response = await fetch('/api/ai-assistant', {
+      const response = await fetch(`${BASE_URL}/api/ai-assistant`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -100,7 +101,7 @@ export const useAIAssistant = () => {
     try {
       setLoading(true);
 
-      const response = await fetch('/api/ai-assistant', {
+      const response = await fetch(`${BASE_URL}/api/ai-assistant`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -142,7 +143,7 @@ export const useAIAssistant = () => {
     if (!token) return;
 
     try {
-      const response = await fetch('/api/ai-assistant', {
+      const response = await fetch(`${BASE_URL}/api/ai-assistant`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -180,7 +181,7 @@ export const useAIAssistant = () => {
     if (!token) return;
 
     try {
-      const response = await fetch(`/api/ai-suggestions/${suggestionId}`, {
+      const response = await fetch(`${BASE_URL}/api/ai-suggestions/${suggestionId}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -214,7 +215,7 @@ export const useAIAssistant = () => {
     if (!token) return;
 
     try {
-      const response = await fetch(`/api/ai-suggestions/${suggestionId}/feedback`, {
+      const response = await fetch(`${BASE_URL}/api/ai-suggestions/${suggestionId}/feedback`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -247,7 +248,7 @@ export const useAIAssistant = () => {
     if (!token) return;
 
     try {
-      const response = await fetch(`/api/ai-suggestions/${suggestionId}`, {
+      const response = await fetch(`${BASE_URL}/api/ai-suggestions/${suggestionId}`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${token}`
@@ -276,7 +277,7 @@ export const useAIAssistant = () => {
     if (user) {
       const token = localStorage.getItem('auth_token');
       if (token) {
-        fetch('/api/user/preferences', {
+        fetch(`${BASE_URL}/api/user/preferences`, {
           method: 'PATCH',
           headers: {
             'Content-Type': 'application/json',

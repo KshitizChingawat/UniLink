@@ -1,4 +1,5 @@
-const BASE_URL = "https://unilink-backend-8tyj.onrender.com";
+export const BASE_URL = "https://unilink-backend-8tyj.onrender.com";
+
 export class ApiError extends Error {
   status: number;
 
@@ -34,7 +35,7 @@ export const apiFetch = async <T>(input: string, init: RequestInit = {}): Promis
   if (!response.ok) {
     const message =
       typeof payload === "object" && payload && "error" in payload
-        ? String(payload.error)
+        ? String((payload as Record<string, unknown>).error)
         : "Request failed";
     throw new ApiError(message, response.status);
   }

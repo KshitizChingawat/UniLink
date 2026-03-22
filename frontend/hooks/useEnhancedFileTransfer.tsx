@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { BASE_URL } from '@/lib/api';
 import { useAuth } from './useAuth';
 import { useDevices } from './useDevices';
 import { useFileTransfer } from './useFileTransfer';
@@ -74,7 +75,7 @@ export const useEnhancedFileTransfer = () => {
       const token = localStorage.getItem('auth_token');
       if (!token) return;
 
-      const response = await fetch(`/api/file-transfers/${transferId}/download`, {
+      const response = await fetch(`${BASE_URL}/api/file-transfers/${transferId}/download`, {
         headers: {
           'Authorization': `Bearer ${token}`
         }

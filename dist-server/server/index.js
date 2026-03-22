@@ -1,21 +1,31 @@
+import cors from "cors";
 import express from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
-import path from "node:path";
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import { Transform } from "node:stream";
 import { z } from "zod";
+import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
 import { comparePassword, hashPassword, requireAuth, sanitizeUser, signToken } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
-import { nowIso, safeJoinUploadPath, sanitizeFilename } from "./helpers.js";
-import { createId, ensureDataDirs, getUploadDir, loadDb, saveDb } from "./storage.js";
+import { nowIso, sanitizeFilename } from "./helpers.js";
+import { createId, ensureDataDirs, loadDb, saveDb } from "./storage.js";
 const app = express();
+app.use(cors({
+    origin: "*",
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
+    allowedHeaders: ["Content-Type", "Authorization"]
+}));
 const port = Number(process.env.PORT || 8787);
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 25, standardHeaders: true, legacyHeaders: false });
+const FREE_FILE_SIZE_LIMIT = 100 * 1024 * 1024;
+const PRO_FILE_SIZE_LIMIT = 10 * 1024 * 1024 * 1024;
+const MONTH_IN_MS = 30 * 24 * 60 * 60 * 1000;
 app.use(helmet({
     crossOriginResourcePolicy: false,
 }));
-app.use(express.json({ limit: "3mb" }));
-app.use(express.urlencoded({ extended: true, limit: "3mb" }));
+app.use(express.json({ limit: "160mb" }));
+app.use(express.urlencoded({ extended: true, limit: "160mb" }));
 const registerSchema = z.object({
     email: z.string().trim().email().max(120),
     password: z.string().min(8).max(128),
@@ -27,6 +37,24 @@ const loginSchema = z.object({
     password: z.string().min(1).max(128),
     rememberMe: z.boolean().optional(),
 });
+const googleAuthSchema = z.object({
+    email: z.string().trim().email().max(120),
+    rememberMe: z.boolean().optional(),
+});
+const pairClaimSchema = z.object({
+    deviceName: z.string().trim().min(1).max(120),
+    deviceType: z.enum(["desktop", "mobile", "tablet", "browser"]),
+    platform: z.enum(["windows", "macos", "linux", "android", "ios", "browser"]),
+    deviceId: z.string().trim().min(1).max(120),
+});
+const profileSchema = z.object({
+    email: z.string().trim().email().max(120).optional(),
+    firstName: z.string().trim().min(1).max(60).optional(),
+    lastName: z.string().trim().min(1).max(60).optional(),
+});
+const billingSchema = z.object({
+    plan: z.literal("pro"),
+});
 const deviceSchema = z.object({
     deviceName: z.string().trim().min(1).max(120),
     deviceType: z.enum(["desktop", "mobile", "tablet", "browser"]),
@@ -36,7 +64,7 @@ const deviceSchema = z.object({
 });
 const fileTransferSchema = z.object({
     fileName: z.string().trim().min(1).max(180),
-    fileSize: z.coerce.number().int().nonnegative().max(1024 * 1024 * 1024),
+    fileSize: z.coerce.number().int().nonnegative().max(PRO_FILE_SIZE_LIMIT),
     fileType: z.string().trim().max(120).optional(),
     senderDeviceId: z.string().trim().min(1),
     receiverDeviceId: z.string().trim().optional(),
@@ -65,11 +93,104 @@ const bluetoothSchema = z.object({
     signal_strength: z.number().int().min(-120).max(20).optional(),
     pairing_status: z.enum(["discovered", "pairing", "paired", "trusted", "blocked"]).default("discovered"),
 });
-const userResponse = (user) => sanitizeUser(user);
+const uploadHeadersSchema = z.object({
+    "x-file-name": z.string().trim().min(1).max(180),
+    "x-file-size": z.coerce.number().int().nonnegative().max(PRO_FILE_SIZE_LIMIT),
+    "x-file-type": z.string().trim().max(120).optional(),
+    "x-sender-device-id": z.string().trim().min(1),
+    "x-receiver-device-id": z.string().trim().optional(),
+    "x-transfer-method": z.enum(["cloud", "p2p", "local"]).optional(),
+});
+const isSubscriptionActive = (user) => user.plan === "pro" &&
+    Boolean(user.subscriptionExpiresAt) &&
+    new Date(user.subscriptionExpiresAt).getTime() > Date.now();
+const refreshUserPlan = (user) => {
+    if (user.plan === "pro" && !isSubscriptionActive(user)) {
+        user.plan = "free";
+        user.subscriptionStartedAt = undefined;
+        user.subscriptionExpiresAt = undefined;
+        user.updatedAt = nowIso();
+        return true;
+    }
+    return false;
+};
+const getUserFileLimit = (user) => isSubscriptionActive(user) ? PRO_FILE_SIZE_LIMIT : FREE_FILE_SIZE_LIMIT;
+const formatLimitLabel = (bytes) => (bytes >= 1024 * 1024 * 1024 ? "10 GB" : "100 MB");
+const getUploadLimitMessage = (user, limit) => isSubscriptionActive(user)
+    ? `Your Pro plan supports files up to ${formatLimitLabel(limit)}.`
+    : `This file can't be uploaded under the Free plan. Upgrade to Pro to share files up to 10 GB.`;
+const parseUploadHeaders = (headers) => uploadHeadersSchema.safeParse({
+    "x-file-name": typeof headers["x-file-name"] === "string"
+        ? decodeURIComponent(headers["x-file-name"])
+        : headers["x-file-name"],
+    "x-file-size": headers["x-file-size"],
+    "x-file-type": headers["x-file-type"],
+    "x-sender-device-id": headers["x-sender-device-id"],
+    "x-receiver-device-id": headers["x-receiver-device-id"],
+    "x-transfer-method": headers["x-transfer-method"],
+});
+const userResponse = (user) => {
+    refreshUserPlan(user);
+    return sanitizeUser(user);
+};
 const findUser = async (userId) => {
     const db = await loadDb();
-    return db.users.find((entry) => entry.id === userId) || null;
+    const user = db.users.find((entry) => entry.id === userId) || null;
+    if (user && refreshUserPlan(user)) {
+        await saveDb(db);
+    }
+    return user;
 };
+const getLanAddress = () => {
+    const interfaces = os.networkInterfaces();
+    for (const network of Object.values(interfaces)) {
+        for (const entry of network || []) {
+            if (entry.family === "IPv4" && !entry.internal) {
+                return entry.address;
+            }
+        }
+    }
+    return "localhost";
+};
+const getAppBaseUrl = (req) => {
+    const configured = process.env.APP_BASE_URL?.trim();
+    if (configured) {
+        return configured.replace(/\/$/, "");
+    }
+    const originHeader = req.headers.origin;
+    const origin = Array.isArray(originHeader) ? originHeader[0] : originHeader;
+    if (origin) {
+        const normalizedOrigin = origin.replace(/\/$/, "");
+        if (!normalizedOrigin.includes("localhost") && !normalizedOrigin.includes("127.0.0.1")) {
+            return normalizedOrigin;
+        }
+        const frontendPort = normalizedOrigin.split(":")[2] || "5173";
+        return `http://${getLanAddress()}:${frontendPort}`;
+    }
+    const forwardedHost = req.headers["x-forwarded-host"];
+    const hostHeader = Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost || req.headers.host || "";
+    const protocolHeader = req.headers["x-forwarded-proto"];
+    const protocol = Array.isArray(protocolHeader) ? protocolHeader[0] : protocolHeader || req.protocol || "http";
+    if (hostHeader && !String(hostHeader).includes("localhost") && !String(hostHeader).startsWith("127.0.0.1")) {
+        return `${protocol}://${hostHeader}`;
+    }
+    const lanAddress = getLanAddress();
+    const portFromHost = String(hostHeader).split(":")[1] || "5173";
+    return `http://${lanAddress}:${portFromHost}`;
+};
+const buildPairSession = (userId) => {
+    const createdAt = nowIso();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    const code = createId().replace(/-/g, "");
+    return {
+        id: createId(),
+        userId,
+        code,
+        createdAt,
+        expiresAt,
+    };
+};
+const isPairSessionExpired = (session) => Boolean(session.usedAt) || new Date(session.expiresAt).getTime() <= Date.now();
 app.get("/api/health", async (_req, res) => {
     const db = await loadDb();
     res.json({
@@ -87,7 +208,7 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
     const db = await loadDb();
     const email = parsed.data.email.toLowerCase();
     if (db.users.some((user) => user.email === email)) {
-        res.status(409).json({ error: "Email is already registered" });
+        res.json({ error: "Email is already registered", duplicateEmail: true });
         return;
     }
     const timestamp = nowIso();
@@ -99,6 +220,7 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
         passwordHash: await hashPassword(parsed.data.password),
         createdAt: timestamp,
         updatedAt: timestamp,
+        plan: "free",
         preferences: {
             aiAssistantEnabled: true,
         },
@@ -123,6 +245,52 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
         res.status(401).json({ error: "Invalid credentials" });
         return;
     }
+    if (refreshUserPlan(user)) {
+        await saveDb(db);
+    }
+    res.json({
+        token: signToken(user, parsed.data.rememberMe),
+        user: userResponse(user),
+    });
+});
+app.post("/api/auth/google", authLimiter, async (req, res) => {
+    const parsed = googleAuthSchema.safeParse(req.body);
+    if (!parsed.success) {
+        res.status(400).json({ error: "Invalid Google login request" });
+        return;
+    }
+    const email = parsed.data.email.toLowerCase();
+    if (!email.endsWith("@gmail.com") && !email.endsWith("@googlemail.com")) {
+        res.status(400).json({ error: "Use a valid Google Gmail address" });
+        return;
+    }
+    const db = await loadDb();
+    let user = db.users.find((entry) => entry.email === email);
+    if (!user) {
+        const localPart = email.split("@")[0];
+        const [firstName = "Google", lastName = "User"] = localPart
+            .split(/[.\-_]/)
+            .filter(Boolean)
+            .map((part) => part.charAt(0).toUpperCase() + part.slice(1));
+        user = {
+            id: createId(),
+            email,
+            firstName,
+            lastName,
+            passwordHash: await hashPassword(createId()),
+            createdAt: nowIso(),
+            updatedAt: nowIso(),
+            plan: "free",
+            preferences: {
+                aiAssistantEnabled: true,
+            },
+        };
+        db.users.push(user);
+        await saveDb(db);
+    }
+    if (refreshUserPlan(user)) {
+        await saveDb(db);
+    }
     res.json({
         token: signToken(user, parsed.data.rememberMe),
         user: userResponse(user),
@@ -134,6 +302,146 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
         res.status(404).json({ error: "User not found" });
         return;
     }
+    res.json({ user: userResponse(user) });
+});
+app.post("/api/billing/subscribe", requireAuth, async (req, res) => {
+    const parsed = billingSchema.safeParse(req.body);
+    if (!parsed.success) {
+        res.status(400).json({ error: "Invalid subscription request" });
+        return;
+    }
+    const db = await loadDb();
+    const user = db.users.find((entry) => entry.id === req.auth.userId);
+    if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+    }
+    const paymentDate = nowIso();
+    user.plan = "pro";
+    user.subscriptionStartedAt = paymentDate;
+    user.subscriptionExpiresAt = new Date(Date.now() + MONTH_IN_MS).toISOString();
+    user.updatedAt = paymentDate;
+    await saveDb(db);
+    res.json({
+        user: userResponse(user),
+        message: "Pro subscription activated for 30 days.",
+    });
+});
+app.post("/api/pair-sessions", requireAuth, async (req, res) => {
+    const db = await loadDb();
+    db.pairSessions = db.pairSessions.filter((session) => !isPairSessionExpired(session));
+    const appBaseUrl = getAppBaseUrl(req);
+    const existing = db.pairSessions.find((session) => session.userId === req.auth.userId && !isPairSessionExpired(session));
+    if (existing) {
+        await saveDb(db);
+        res.status(201).json({
+            ...existing,
+            connectUrl: `${appBaseUrl}/connect/${existing.code}`,
+        });
+        return;
+    }
+    const session = buildPairSession(req.auth.userId);
+    db.pairSessions.unshift(session);
+    await saveDb(db);
+    res.status(201).json({
+        ...session,
+        connectUrl: `${appBaseUrl}/connect/${session.code}`,
+    });
+});
+app.get("/api/pair-sessions/:code", async (req, res) => {
+    const db = await loadDb();
+    const session = db.pairSessions.find((entry) => entry.code === req.params.code);
+    if (!session || isPairSessionExpired(session)) {
+        res.status(404).json({ error: "Pairing session not found or expired" });
+        return;
+    }
+    const user = db.users.find((entry) => entry.id === session.userId);
+    res.json({
+        code: session.code,
+        expiresAt: session.expiresAt,
+        accountLabel: user ? `${user.firstName} ${user.lastName}`.trim() || user.email : "UniLink account",
+    });
+});
+app.post("/api/pair-sessions/:code/claim", async (req, res) => {
+    const parsed = pairClaimSchema.safeParse(req.body);
+    if (!parsed.success) {
+        res.status(400).json({ error: "Invalid device claim payload" });
+        return;
+    }
+    const db = await loadDb();
+    const session = db.pairSessions.find((entry) => entry.code === req.params.code);
+    if (!session || isPairSessionExpired(session)) {
+        res.status(404).json({ error: "Pairing session not found or expired" });
+        return;
+    }
+    const user = db.users.find((entry) => entry.id === session.userId);
+    if (!user) {
+        res.status(404).json({ error: "Account not found" });
+        return;
+    }
+    const timestamp = nowIso();
+    let device = db.devices.find((entry) => entry.userId === user.id && entry.deviceId === parsed.data.deviceId);
+    if (device) {
+        device.deviceName = parsed.data.deviceName;
+        device.deviceType = parsed.data.deviceType;
+        device.platform = parsed.data.platform;
+        device.lastSeen = timestamp;
+        device.isActive = true;
+        device.updatedAt = timestamp;
+    }
+    else {
+        device = {
+            id: createId(),
+            userId: user.id,
+            deviceName: parsed.data.deviceName,
+            deviceType: parsed.data.deviceType,
+            platform: parsed.data.platform,
+            deviceId: parsed.data.deviceId,
+            lastSeen: timestamp,
+            isActive: true,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+        };
+        db.devices.push(device);
+    }
+    session.usedAt = timestamp;
+    session.claimedDeviceId = device.id;
+    await saveDb(db);
+    res.json({
+        token: signToken(user, true),
+        user: userResponse(user),
+        device,
+    });
+});
+app.patch("/api/auth/profile", requireAuth, async (req, res) => {
+    const parsed = profileSchema.safeParse(req.body);
+    if (!parsed.success) {
+        res.status(400).json({ error: "Invalid profile update" });
+        return;
+    }
+    const db = await loadDb();
+    const user = db.users.find((entry) => entry.id === req.auth.userId);
+    if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+    }
+    if (parsed.data.email) {
+        const normalizedEmail = parsed.data.email.toLowerCase();
+        const duplicateUser = db.users.find((entry) => entry.id !== user.id && entry.email === normalizedEmail);
+        if (duplicateUser) {
+            res.status(409).json({ error: "Email is already registered" });
+            return;
+        }
+        user.email = normalizedEmail;
+    }
+    if (parsed.data.firstName) {
+        user.firstName = parsed.data.firstName;
+    }
+    if (parsed.data.lastName) {
+        user.lastName = parsed.data.lastName;
+    }
+    user.updatedAt = nowIso();
+    await saveDb(db);
     res.json({ user: userResponse(user) });
 });
 app.get("/api/devices", requireAuth, async (req, res) => {
@@ -243,21 +551,134 @@ app.get("/api/file-transfers", requireAuth, async (req, res) => {
         .filter((transfer) => transfer.userId === req.auth.userId)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
 });
+app.post("/api/file-transfers/upload", requireAuth, async (req, res) => {
+    const parsedHeaders = parseUploadHeaders(req.headers);
+    if (!parsedHeaders.success) {
+        res.status(400).json({ error: "Invalid upload metadata" });
+        return;
+    }
+    const db = await loadDb();
+    const user = db.users.find((entry) => entry.id === req.auth.userId);
+    if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+    }
+    if (refreshUserPlan(user)) {
+        await saveDb(db);
+    }
+    const fileLimit = getUserFileLimit(user);
+    if (parsedHeaders.data["x-file-size"] > fileLimit) {
+        res.status(400).json({
+            error: getUploadLimitMessage(user, fileLimit),
+            fileLimit,
+            plan: isSubscriptionActive(user) ? "pro" : "free",
+        });
+        return;
+    }
+    const transferId = createId();
+    const storagePath = `${req.auth.userId}/${transferId}-${sanitizeFilename(parsedHeaders.data["x-file-name"])}`;
+    // Buffer stream and count bytes via Transform (fixes race condition with dual listeners)
+    let bytesWritten = 0;
+    const chunks = [];
+    try {
+        await new Promise((resolve, reject) => {
+            const counter = new Transform({
+                transform(chunk, _enc, cb) {
+                    bytesWritten += chunk.length;
+                    if (bytesWritten > fileLimit) {
+                        cb(new Error(`File exceeds the ${formatLimitLabel(fileLimit)} plan limit.`));
+                    }
+                    else {
+                        chunks.push(chunk);
+                        cb(null, chunk);
+                    }
+                },
+            });
+            req.pipe(counter);
+            counter.on("finish", resolve);
+            counter.on("error", reject);
+            req.on("error", reject);
+        });
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : "Upload failed";
+        res.status(400).json({ error: message });
+        return;
+    }
+    if (bytesWritten !== parsedHeaders.data["x-file-size"]) {
+        res.status(400).json({ error: "Uploaded file size did not match the declared size." });
+        return;
+    }
+    const fileBuffer = Buffer.concat(chunks);
+    const { error: uploadError } = await supabase.storage
+        .from(FILE_BUCKET)
+        .upload(storagePath, fileBuffer, {
+        contentType: parsedHeaders.data["x-file-type"] || "application/octet-stream",
+        upsert: false,
+    });
+    if (uploadError) {
+        console.error("Supabase Storage upload error:", uploadError);
+        res.status(500).json({ error: "Failed to store file. Please try again." });
+        return;
+    }
+    const transfer = {
+        id: transferId,
+        userId: req.auth.userId,
+        senderDeviceId: parsedHeaders.data["x-sender-device-id"],
+        receiverDeviceId: parsedHeaders.data["x-receiver-device-id"],
+        fileName: parsedHeaders.data["x-file-name"],
+        fileSize: parsedHeaders.data["x-file-size"],
+        fileType: parsedHeaders.data["x-file-type"],
+        transferStatus: "completed",
+        transferMethod: parsedHeaders.data["x-transfer-method"] || "cloud",
+        createdAt: nowIso(),
+        completedAt: nowIso(),
+        filePath: storagePath, // Supabase Storage path
+    };
+    db.fileTransfers.unshift(transfer);
+    await saveDb(db);
+    res.status(201).json(transfer);
+});
 app.post("/api/file-transfers", requireAuth, async (req, res) => {
     const parsed = fileTransferSchema.safeParse(req.body);
     if (!parsed.success) {
         res.status(400).json({ error: "Invalid file transfer payload" });
         return;
     }
+    const db = await loadDb();
+    const user = db.users.find((entry) => entry.id === req.auth.userId);
+    if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+    }
+    if (refreshUserPlan(user)) {
+        await saveDb(db);
+    }
+    const fileLimit = getUserFileLimit(user);
+    if (parsed.data.fileSize > fileLimit) {
+        res.status(400).json({
+            error: getUploadLimitMessage(user, fileLimit),
+            fileLimit,
+            plan: isSubscriptionActive(user) ? "pro" : "free",
+        });
+        return;
+    }
     const base64Data = typeof req.body.fileData === "string" ? req.body.fileData : "";
-    let filePath;
     if (base64Data) {
-        const userDir = path.join(getUploadDir(), req.auth.userId);
-        await mkdir(userDir, { recursive: true });
         const transferId = createId();
-        filePath = safeJoinUploadPath(userDir, `${transferId}-${sanitizeFilename(parsed.data.fileName)}`);
+        const storagePath = `${req.auth.userId}/${transferId}-${sanitizeFilename(parsed.data.fileName)}`;
         const buffer = Buffer.from(base64Data, "base64");
-        await writeFile(filePath, buffer);
+        const { error: uploadError } = await supabase.storage
+            .from(FILE_BUCKET)
+            .upload(storagePath, buffer, {
+            contentType: parsed.data.fileType || "application/octet-stream",
+            upsert: false,
+        });
+        if (uploadError) {
+            console.error("Supabase Storage upload error (base64 path):", uploadError);
+            res.status(500).json({ error: "Failed to store file. Please try again." });
+            return;
+        }
         const transfer = {
             id: transferId,
             userId: req.auth.userId,
@@ -270,9 +691,8 @@ app.post("/api/file-transfers", requireAuth, async (req, res) => {
             transferMethod: parsed.data.transferMethod,
             createdAt: nowIso(),
             completedAt: nowIso(),
-            filePath,
+            filePath: storagePath,
         };
-        const db = await loadDb();
         db.fileTransfers.unshift(transfer);
         await saveDb(db);
         res.status(201).json(transfer);
@@ -290,7 +710,6 @@ app.post("/api/file-transfers", requireAuth, async (req, res) => {
         transferMethod: parsed.data.transferMethod,
         createdAt: nowIso(),
     };
-    const db = await loadDb();
     db.fileTransfers.unshift(transfer);
     await saveDb(db);
     res.status(201).json(transfer);
@@ -318,7 +737,18 @@ app.get("/api/file-transfers/:id/download", requireAuth, async (req, res) => {
         res.status(404).json({ error: "File not found" });
         return;
     }
-    res.download(transfer.filePath, transfer.fileName);
+    // Generate a short-lived signed URL from Supabase Storage
+    const { data, error } = await supabase.storage
+        .from(FILE_BUCKET)
+        .createSignedUrl(transfer.filePath, 60, {
+        download: transfer.fileName,
+    });
+    if (error || !data?.signedUrl) {
+        console.error("Supabase signed URL error:", error);
+        res.status(500).json({ error: "Could not generate download link" });
+        return;
+    }
+    res.redirect(data.signedUrl);
 });
 app.get("/api/vault", requireAuth, async (req, res) => {
     const db = await loadDb();
@@ -564,23 +994,64 @@ app.delete("/api/file-transfers/:id", requireAuth, async (req, res) => {
     const db = await loadDb();
     const transfer = db.fileTransfers.find((entry) => entry.id === req.params.id && entry.userId === req.auth.userId);
     if (transfer?.filePath) {
-        await unlink(transfer.filePath).catch(() => undefined);
+        // Remove from Supabase Storage (fire-and-forget, do not block the response)
+        supabase.storage.from(FILE_BUCKET).remove([transfer.filePath]).catch((err) => {
+            console.error("Supabase Storage delete error:", err);
+        });
     }
     db.fileTransfers = db.fileTransfers.filter((entry) => !(entry.id === req.params.id && entry.userId === req.auth.userId));
     await saveDb(db);
     res.status(204).send();
 });
-if (process.env.NODE_ENV === "production") {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res, next) => {
-        if (req.path.startsWith("/api/")) {
-            next();
-            return;
+// 🔥 REAL-TIME FILE TRANSFER (SESSION BASED)
+// Uses Supabase Storage so files survive server restarts on Render.
+app.post("/api/send", async (req, res) => {
+    const { sessionId, file } = req.body;
+    if (!sessionId || !file) {
+        return res.status(400).json({ error: "Missing sessionId or file" });
+    }
+    try {
+        const buffer = Buffer.from(file, "base64");
+        const { error } = await supabase.storage
+            .from(SESSION_BUCKET)
+            .upload(`sessions/${sessionId}`, buffer, {
+            contentType: "application/octet-stream",
+            upsert: true,
+        });
+        if (error) {
+            console.error("Session upload error:", error);
+            return res.status(500).json({ error: "Failed to store session file" });
         }
-        res.sendFile(path.join(distPath, "index.html"));
-    });
-}
+        res.json({ success: true });
+    }
+    catch (err) {
+        console.error("Session send error:", err);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+app.get("/api/receive/:sessionId", async (req, res) => {
+    const { sessionId } = req.params;
+    try {
+        const { data, error } = await supabase.storage
+            .from(SESSION_BUCKET)
+            .download(`sessions/${sessionId}`);
+        if (error || !data) {
+            return res.status(404).json({ error: "No file yet" });
+        }
+        const arrayBuffer = await data.arrayBuffer();
+        const file = Buffer.from(arrayBuffer).toString("base64");
+        // Delete after retrieval (one-time pickup)
+        supabase.storage
+            .from(SESSION_BUCKET)
+            .remove([`sessions/${sessionId}`])
+            .catch((err) => console.error("Session cleanup error:", err));
+        res.json({ file });
+    }
+    catch (err) {
+        console.error("Session receive error:", err);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
 ensureDataDirs()
     .then(() => {
     app.listen(port, () => {

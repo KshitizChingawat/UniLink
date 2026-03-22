@@ -1,9 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
-const dataDir = path.join(process.cwd(), "server", "data");
-const dbPath = path.join(dataDir, "db.json");
-const uploadDir = path.join(dataDir, "uploads");
+import { supabase, DB_BUCKET } from "./supabase.js";
+const DB_OBJECT_PATH = "db.json";
 const initialDb = {
     users: [],
     devices: [],
@@ -33,28 +30,43 @@ const normalizeDb = (raw) => ({
     bluetoothDevices: raw?.bluetoothDevices || [],
     pairSessions: raw?.pairSessions || [],
 });
-export const ensureDataDirs = async () => {
-    await mkdir(uploadDir, { recursive: true });
-};
-export const getUploadDir = () => uploadDir;
+// no-op: kept so index.ts startup doesn't need to change
+export const ensureDataDirs = async () => { };
 export const createId = () => randomUUID();
+const readDb = async () => {
+    const { data, error } = await supabase.storage
+        .from(DB_BUCKET)
+        .download(DB_OBJECT_PATH);
+    if (error)
+        return null;
+    const text = await data.text();
+    return text;
+};
+const writeDb = async (json) => {
+    const buffer = Buffer.from(json, "utf8");
+    const { error } = await supabase.storage
+        .from(DB_BUCKET)
+        .upload(DB_OBJECT_PATH, buffer, {
+        contentType: "application/json",
+        upsert: true,
+    });
+    if (error)
+        throw new Error(`Failed to save database: ${error.message}`);
+};
 export const loadDb = async () => {
-    if (dbCache) {
+    if (dbCache)
         return dbCache;
-    }
-    await ensureDataDirs();
     try {
-        const raw = await readFile(dbPath, "utf8");
-        dbCache = normalizeDb(JSON.parse(raw));
+        const raw = await readDb();
+        dbCache = normalizeDb(raw ? JSON.parse(raw) : null);
     }
     catch {
-        dbCache = initialDb;
-        await saveDb(dbCache);
+        dbCache = { ...initialDb };
+        await writeDb(JSON.stringify(dbCache, null, 2));
     }
     return dbCache;
 };
 export const saveDb = async (db) => {
     dbCache = db;
-    await ensureDataDirs();
-    await writeFile(dbPath, JSON.stringify(db, null, 2), "utf8");
+    await writeDb(JSON.stringify(db, null, 2));
 };

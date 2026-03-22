@@ -2,16 +2,14 @@ import cors from "cors";
 import express from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
-import path from "node:path";
 import os from "node:os";
-import { createWriteStream } from "node:fs";
-import { mkdir, unlink, writeFile } from "node:fs/promises";
-import { pipeline } from "node:stream/promises";
+import { Transform } from "node:stream";
 import { z } from "zod";
+import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
 import { comparePassword, hashPassword, requireAuth, sanitizeUser, signToken } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
-import { nowIso, safeJoinUploadPath, sanitizeFilename } from "./helpers.js";
-import { createId, ensureDataDirs, getUploadDir, loadDb, saveDb } from "./storage.js";
+import { nowIso, sanitizeFilename } from "./helpers.js";
+import { createId, ensureDataDirs, loadDb, saveDb } from "./storage.js";
 const app = express();
 app.use(cors({
     origin: "*",
@@ -578,28 +576,49 @@ app.post("/api/file-transfers/upload", requireAuth, async (req, res) => {
         return;
     }
     const transferId = createId();
-    const userDir = path.join(getUploadDir(), req.auth.userId);
-    await mkdir(userDir, { recursive: true });
-    const filePath = safeJoinUploadPath(userDir, `${transferId}-${sanitizeFilename(parsedHeaders.data["x-file-name"])}`);
+    const storagePath = `${req.auth.userId}/${transferId}-${sanitizeFilename(parsedHeaders.data["x-file-name"])}`;
+    // Buffer stream and count bytes via Transform (fixes race condition with dual listeners)
     let bytesWritten = 0;
-    req.on("data", (chunk) => {
-        bytesWritten += chunk.length;
-        if (bytesWritten > fileLimit) {
-            req.destroy(new Error(`File exceeds the ${formatLimitLabel(fileLimit)} plan limit.`));
-        }
-    });
+    const chunks = [];
     try {
-        await pipeline(req, createWriteStream(filePath));
+        await new Promise((resolve, reject) => {
+            const counter = new Transform({
+                transform(chunk, _enc, cb) {
+                    bytesWritten += chunk.length;
+                    if (bytesWritten > fileLimit) {
+                        cb(new Error(`File exceeds the ${formatLimitLabel(fileLimit)} plan limit.`));
+                    }
+                    else {
+                        chunks.push(chunk);
+                        cb(null, chunk);
+                    }
+                },
+            });
+            req.pipe(counter);
+            counter.on("finish", resolve);
+            counter.on("error", reject);
+            req.on("error", reject);
+        });
     }
     catch (error) {
-        await unlink(filePath).catch(() => undefined);
         const message = error instanceof Error ? error.message : "Upload failed";
         res.status(400).json({ error: message });
         return;
     }
     if (bytesWritten !== parsedHeaders.data["x-file-size"]) {
-        await unlink(filePath).catch(() => undefined);
         res.status(400).json({ error: "Uploaded file size did not match the declared size." });
+        return;
+    }
+    const fileBuffer = Buffer.concat(chunks);
+    const { error: uploadError } = await supabase.storage
+        .from(FILE_BUCKET)
+        .upload(storagePath, fileBuffer, {
+        contentType: parsedHeaders.data["x-file-type"] || "application/octet-stream",
+        upsert: false,
+    });
+    if (uploadError) {
+        console.error("Supabase Storage upload error:", uploadError);
+        res.status(500).json({ error: "Failed to store file. Please try again." });
         return;
     }
     const transfer = {
@@ -614,7 +633,7 @@ app.post("/api/file-transfers/upload", requireAuth, async (req, res) => {
         transferMethod: parsedHeaders.data["x-transfer-method"] || "cloud",
         createdAt: nowIso(),
         completedAt: nowIso(),
-        filePath,
+        filePath: storagePath, // Supabase Storage path
     };
     db.fileTransfers.unshift(transfer);
     await saveDb(db);
@@ -645,14 +664,21 @@ app.post("/api/file-transfers", requireAuth, async (req, res) => {
         return;
     }
     const base64Data = typeof req.body.fileData === "string" ? req.body.fileData : "";
-    let filePath;
     if (base64Data) {
-        const userDir = path.join(getUploadDir(), req.auth.userId);
-        await mkdir(userDir, { recursive: true });
         const transferId = createId();
-        filePath = safeJoinUploadPath(userDir, `${transferId}-${sanitizeFilename(parsed.data.fileName)}`);
+        const storagePath = `${req.auth.userId}/${transferId}-${sanitizeFilename(parsed.data.fileName)}`;
         const buffer = Buffer.from(base64Data, "base64");
-        await writeFile(filePath, buffer);
+        const { error: uploadError } = await supabase.storage
+            .from(FILE_BUCKET)
+            .upload(storagePath, buffer, {
+            contentType: parsed.data.fileType || "application/octet-stream",
+            upsert: false,
+        });
+        if (uploadError) {
+            console.error("Supabase Storage upload error (base64 path):", uploadError);
+            res.status(500).json({ error: "Failed to store file. Please try again." });
+            return;
+        }
         const transfer = {
             id: transferId,
             userId: req.auth.userId,
@@ -665,7 +691,7 @@ app.post("/api/file-transfers", requireAuth, async (req, res) => {
             transferMethod: parsed.data.transferMethod,
             createdAt: nowIso(),
             completedAt: nowIso(),
-            filePath,
+            filePath: storagePath,
         };
         db.fileTransfers.unshift(transfer);
         await saveDb(db);
@@ -711,7 +737,18 @@ app.get("/api/file-transfers/:id/download", requireAuth, async (req, res) => {
         res.status(404).json({ error: "File not found" });
         return;
     }
-    res.download(transfer.filePath, transfer.fileName);
+    // Generate a short-lived signed URL from Supabase Storage
+    const { data, error } = await supabase.storage
+        .from(FILE_BUCKET)
+        .createSignedUrl(transfer.filePath, 60, {
+        download: transfer.fileName,
+    });
+    if (error || !data?.signedUrl) {
+        console.error("Supabase signed URL error:", error);
+        res.status(500).json({ error: "Could not generate download link" });
+        return;
+    }
+    res.redirect(data.signedUrl);
 });
 app.get("/api/vault", requireAuth, async (req, res) => {
     const db = await loadDb();
@@ -957,11 +994,63 @@ app.delete("/api/file-transfers/:id", requireAuth, async (req, res) => {
     const db = await loadDb();
     const transfer = db.fileTransfers.find((entry) => entry.id === req.params.id && entry.userId === req.auth.userId);
     if (transfer?.filePath) {
-        await unlink(transfer.filePath).catch(() => undefined);
+        // Remove from Supabase Storage (fire-and-forget, do not block the response)
+        supabase.storage.from(FILE_BUCKET).remove([transfer.filePath]).catch((err) => {
+            console.error("Supabase Storage delete error:", err);
+        });
     }
     db.fileTransfers = db.fileTransfers.filter((entry) => !(entry.id === req.params.id && entry.userId === req.auth.userId));
     await saveDb(db);
     res.status(204).send();
+});
+// 🔥 REAL-TIME FILE TRANSFER (SESSION BASED)
+// Uses Supabase Storage so files survive server restarts on Render.
+app.post("/api/send", async (req, res) => {
+    const { sessionId, file } = req.body;
+    if (!sessionId || !file) {
+        return res.status(400).json({ error: "Missing sessionId or file" });
+    }
+    try {
+        const buffer = Buffer.from(file, "base64");
+        const { error } = await supabase.storage
+            .from(SESSION_BUCKET)
+            .upload(`sessions/${sessionId}`, buffer, {
+            contentType: "application/octet-stream",
+            upsert: true,
+        });
+        if (error) {
+            console.error("Session upload error:", error);
+            return res.status(500).json({ error: "Failed to store session file" });
+        }
+        res.json({ success: true });
+    }
+    catch (err) {
+        console.error("Session send error:", err);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+app.get("/api/receive/:sessionId", async (req, res) => {
+    const { sessionId } = req.params;
+    try {
+        const { data, error } = await supabase.storage
+            .from(SESSION_BUCKET)
+            .download(`sessions/${sessionId}`);
+        if (error || !data) {
+            return res.status(404).json({ error: "No file yet" });
+        }
+        const arrayBuffer = await data.arrayBuffer();
+        const file = Buffer.from(arrayBuffer).toString("base64");
+        // Delete after retrieval (one-time pickup)
+        supabase.storage
+            .from(SESSION_BUCKET)
+            .remove([`sessions/${sessionId}`])
+            .catch((err) => console.error("Session cleanup error:", err));
+        res.json({ file });
+    }
+    catch (err) {
+        console.error("Session receive error:", err);
+        res.status(500).json({ error: "Internal server error" });
+    }
 });
 ensureDataDirs()
     .then(() => {

@@ -11,6 +11,7 @@ import { useDropzone } from 'react-dropzone';
 import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useAuth } from '@/hooks/useAuth';
+import { BASE_URL } from '@/lib/api';
 
 const FileTransferPage = () => {
   const { user } = useAuth();
@@ -132,7 +133,7 @@ const FileTransferPage = () => {
   const previewVideo = async (transfer: any) => {
     try {
       const token = localStorage.getItem('auth_token');
-      const response = await fetch(`/api/file-transfers/${transfer.id}/download`, {
+      const response = await fetch(`${BASE_URL}/api/file-transfers/${transfer.id}/download`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
 

@@ -3,7 +3,7 @@ services:
     name: unilink
     runtime: node
     buildCommand: npm install && npm run build
-    startCommand: npm run start
+    startCommand: npm run start -w backend
     envVars:
       - key: NODE_ENV
         value: production

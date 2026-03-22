@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { BASE_URL } from '@/lib/api';
 import { useAuth } from './useAuth';
 import { useDevices } from './useDevices';
 import { toast } from 'sonner';
+import { BASE_URL } from '@/lib/api';
 
 interface SyncEvent {
   type: string;
@@ -287,7 +289,7 @@ export const useRealTimeSync = () => {
     try {
       setSyncStatus('syncing');
       
-      const response = await fetch('/api/sync/trigger', {
+      const response = await fetch(`${BASE_URL}/api/sync/trigger`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
