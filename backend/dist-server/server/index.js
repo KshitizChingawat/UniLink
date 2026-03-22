@@ -14,7 +14,9 @@ import { nowIso, safeJoinUploadPath, sanitizeFilename } from "./helpers.js";
 import { createId, ensureDataDirs, getUploadDir, loadDb, saveDb } from "./storage.js";
 const app = express();
 app.use(cors({
-    origin: "*"
+    origin: "*",
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
+    allowedHeaders: ["Content-Type", "Authorization"]
 }));
 const port = Number(process.env.PORT || 8787);
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 25, standardHeaders: true, legacyHeaders: false });
