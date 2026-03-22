@@ -112,6 +112,9 @@ const refreshUserPlan = (user) => {
 };
 const getUserFileLimit = (user) => isSubscriptionActive(user) ? PRO_FILE_SIZE_LIMIT : FREE_FILE_SIZE_LIMIT;
 const formatLimitLabel = (bytes) => (bytes >= 1024 * 1024 * 1024 ? "10 GB" : "100 MB");
+const getUploadLimitMessage = (user, limit) => isSubscriptionActive(user)
+    ? `Your Pro plan supports files up to ${formatLimitLabel(limit)}.`
+    : `This file can't be uploaded under the Free plan. Upgrade to Pro to share files up to 10 GB.`;
 const parseUploadHeaders = (headers) => uploadHeadersSchema.safeParse({
     "x-file-name": typeof headers["x-file-name"] === "string"
         ? decodeURIComponent(headers["x-file-name"])
@@ -562,7 +565,7 @@ app.post("/api/file-transfers/upload", requireAuth, async (req, res) => {
     const fileLimit = getUserFileLimit(user);
     if (parsedHeaders.data["x-file-size"] > fileLimit) {
         res.status(400).json({
-            error: `Your ${isSubscriptionActive(user) ? "Pro" : "Free"} plan supports files up to ${formatLimitLabel(fileLimit)}.`,
+            error: getUploadLimitMessage(user, fileLimit),
             fileLimit,
             plan: isSubscriptionActive(user) ? "pro" : "free",
         });
@@ -629,7 +632,7 @@ app.post("/api/file-transfers", requireAuth, async (req, res) => {
     const fileLimit = getUserFileLimit(user);
     if (parsed.data.fileSize > fileLimit) {
         res.status(400).json({
-            error: `Your ${isSubscriptionActive(user) ? "Pro" : "Free"} plan supports files up to ${formatLimitLabel(fileLimit)}.`,
+            error: getUploadLimitMessage(user, fileLimit),
             fileLimit,
             plan: isSubscriptionActive(user) ? "pro" : "free",
         });
