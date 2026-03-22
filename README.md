@@ -165,21 +165,9 @@ Final Year B.Tech (CSE)
 
 📧 Email: [kshitizchingawat5704@gmail.com](mailto:kshitizchingawat5704@gmail.com)
 📞 Contact: +91 8269653513
+
 🔗 GitHub: https://github.com/KshitizChingawat
 
----
-
-## ⭐ Contribute
-
-Feel free to fork the repo and submit pull requests!
-
----
-
-## 📜 License
-
-MIT License
-
----
 
 ## 💡 Final Note
 
