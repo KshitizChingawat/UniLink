@@ -6,7 +6,7 @@ export const hashPassword = async (password) => bcrypt.hash(password, 12);
 export const comparePassword = async (password, hash) => bcrypt.compare(password, hash);
 export const signToken = (user, rememberMe = false) => jwt.sign({ sub: user.id }, JWT_SECRET, {
     issuer,
-    expiresIn: rememberMe ? "30d" : "12h",
+    expiresIn: rememberMe ? "90d" : "7d",
 });
 export const sanitizeUser = (user) => ({
     id: user.id,

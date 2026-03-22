@@ -197,6 +197,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       localStorage.removeItem("auth_token");
       localStorage.removeItem("user_data");
       localStorage.removeItem(settingsKey);
+      localStorage.removeItem("unilink_current_device");
       document.documentElement.classList.remove("dark");
       document.documentElement.setAttribute("data-theme-color", "blue");
       setUser(null);

@@ -19,7 +19,7 @@ export const comparePassword = async (password: string, hash: string) =>
 export const signToken = (user: UserRecord, rememberMe = false) =>
   jwt.sign({ sub: user.id }, JWT_SECRET, {
     issuer,
-    expiresIn: rememberMe ? "30d" : "12h",
+    expiresIn: rememberMe ? "90d" : "7d",
   });
 
 export const sanitizeUser = (user: UserRecord) => ({

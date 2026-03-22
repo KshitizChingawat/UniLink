@@ -16,6 +16,8 @@ const initialDb: AppDatabase = {
 };
 
 let dbCache: AppDatabase | null = null;
+// Write-lock: queue concurrent saveDb calls so they don't race and corrupt db.json
+let writeLock: Promise<void> = Promise.resolve();
 
 const normalizeUser = (user: UserRecord): UserRecord => ({
   ...user,
@@ -47,24 +49,19 @@ const readDb = async (): Promise<string | null> => {
     .from(DB_BUCKET)
     .download(DB_OBJECT_PATH);
   if (error) return null;
-  const text = await data.text();
-  return text;
+  return data.text();
 };
 
 const writeDb = async (json: string): Promise<void> => {
   const buffer = Buffer.from(json, "utf8");
   const { error } = await supabase.storage
     .from(DB_BUCKET)
-    .upload(DB_OBJECT_PATH, buffer, {
-      contentType: "application/json",
-      upsert: true,
-    });
+    .upload(DB_OBJECT_PATH, buffer, { contentType: "application/json", upsert: true });
   if (error) throw new Error(`Failed to save database: ${error.message}`);
 };
 
 export const loadDb = async (): Promise<AppDatabase> => {
   if (dbCache) return dbCache;
-
   try {
     const raw = await readDb();
     dbCache = normalizeDb(raw ? (JSON.parse(raw) as Partial<AppDatabase>) : null);
@@ -72,11 +69,14 @@ export const loadDb = async (): Promise<AppDatabase> => {
     dbCache = { ...initialDb };
     await writeDb(JSON.stringify(dbCache, null, 2));
   }
-
   return dbCache;
 };
 
 export const saveDb = async (db: AppDatabase): Promise<void> => {
-  dbCache = db;
-  await writeDb(JSON.stringify(db, null, 2));
+  dbCache = db; // update cache immediately so in-flight reads stay consistent
+  // Chain writes so they never run in parallel
+  writeLock = writeLock.then(() => writeDb(JSON.stringify(db, null, 2))).catch((err) => {
+    console.error("[storage] saveDb failed:", err);
+  });
+  await writeLock;
 };

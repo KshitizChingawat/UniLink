@@ -28,14 +28,48 @@ export const useFileTransfer = () => {
   const [uploadProgress, setUploadProgress] = useState<{ [key: string]: number }>({});
   const { user } = useAuth();
 
-  const getCurrentDeviceId = () => {
+  const getCurrentDeviceId = (): string | null => {
     if (typeof window === 'undefined') return null;
+    // First try the full registered device object
     const saved = localStorage.getItem('unilink_current_device');
-    if (!saved) return null;
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed?.id) return parsed.id;
+      } catch {
+        localStorage.removeItem('unilink_current_device');
+      }
+    }
+    return null;
+  };
+
+  // Auto-register this browser as a device if not already registered
+  const ensureDeviceRegistered = async (): Promise<string | null> => {
+    const existing = getCurrentDeviceId();
+    if (existing) return existing;
+
+    const token = localStorage.getItem('auth_token');
+    if (!token) return null;
+
     try {
-      const parsed = JSON.parse(saved);
-      return parsed?.id || null;
-    } catch {
+      let deviceId = localStorage.getItem('unilink_device_id');
+      if (!deviceId) {
+        deviceId = `browser_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+        localStorage.setItem('unilink_device_id', deviceId);
+      }
+      const data = await apiFetch<{ id: string }>('/api/devices', {
+        method: 'POST',
+        body: JSON.stringify({
+          deviceName: `${navigator.platform || 'Browser'} Browser`,
+          deviceType: 'browser',
+          platform: 'browser',
+          deviceId,
+        }),
+      });
+      localStorage.setItem('unilink_current_device', JSON.stringify(data));
+      return data.id;
+    } catch (err) {
+      console.error('Auto device registration failed:', err);
       return null;
     }
   };
@@ -62,8 +96,15 @@ export const useFileTransfer = () => {
     targetDeviceId?: string,
     transferMethod: 'cloud' | 'p2p' | 'local' = 'cloud'
   ) => {
-    const currentDeviceId = getCurrentDeviceId();
-    if (!user || !currentDeviceId) return;
+    if (!user) {
+      toast.error('You must be logged in to transfer files.');
+      return;
+    }
+    const currentDeviceId = await ensureDeviceRegistered();
+    if (!currentDeviceId) {
+      toast.error('Could not register your device. Please refresh and try again.');
+      return;
+    }
 
     const token = localStorage.getItem('auth_token');
     if (!token) return;

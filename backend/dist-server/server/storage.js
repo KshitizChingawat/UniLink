@@ -12,6 +12,8 @@ const initialDb = {
     pairSessions: [],
 };
 let dbCache = null;
+// Write-lock: queue concurrent saveDb calls so they don't race and corrupt db.json
+let writeLock = Promise.resolve();
 const normalizeUser = (user) => ({
     ...user,
     plan: user.plan === "pro" ? "pro" : "free",
@@ -39,17 +41,13 @@ const readDb = async () => {
         .download(DB_OBJECT_PATH);
     if (error)
         return null;
-    const text = await data.text();
-    return text;
+    return data.text();
 };
 const writeDb = async (json) => {
     const buffer = Buffer.from(json, "utf8");
     const { error } = await supabase.storage
         .from(DB_BUCKET)
-        .upload(DB_OBJECT_PATH, buffer, {
-        contentType: "application/json",
-        upsert: true,
-    });
+        .upload(DB_OBJECT_PATH, buffer, { contentType: "application/json", upsert: true });
     if (error)
         throw new Error(`Failed to save database: ${error.message}`);
 };
@@ -67,6 +65,10 @@ export const loadDb = async () => {
     return dbCache;
 };
 export const saveDb = async (db) => {
-    dbCache = db;
-    await writeDb(JSON.stringify(db, null, 2));
+    dbCache = db; // update cache immediately so in-flight reads stay consistent
+    // Chain writes so they never run in parallel
+    writeLock = writeLock.then(() => writeDb(JSON.stringify(db, null, 2))).catch((err) => {
+        console.error("[storage] saveDb failed:", err);
+    });
+    await writeLock;
 };
