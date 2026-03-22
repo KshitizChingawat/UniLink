@@ -1,3 +1,4 @@
+import cors from "cors";
 import express from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
@@ -12,6 +13,9 @@ import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
 import { nowIso, safeJoinUploadPath, sanitizeFilename } from "./helpers.js";
 import { createId, ensureDataDirs, getUploadDir, loadDb, saveDb } from "./storage.js";
 const app = express();
+app.use(cors({
+    origin: "*"
+}));
 const port = Number(process.env.PORT || 8787);
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 25, standardHeaders: true, legacyHeaders: false });
 const FREE_FILE_SIZE_LIMIT = 100 * 1024 * 1024;
