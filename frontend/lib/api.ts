@@ -1,3 +1,4 @@
+const BASE_URL = "https://unilink-backend-8tyj.onrender.com";
 export class ApiError extends Error {
   status: number;
 
@@ -22,7 +23,7 @@ export const apiFetch = async <T>(input: string, init: RequestInit = {}): Promis
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(input, {
+  const response = await fetch(`${BASE_URL}${input}`, {
     ...init,
     headers,
   });
