@@ -1,0 +1,174 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+    --radius: 0.75rem;
+    --theme-100: #dbeafe;
+    --theme-500: #3b82f6;
+    --theme-600: #2563eb;
+    --theme-700: #1d4ed8;
+  }
+
+  :root.dark {
+    --background: 222.2 47.4% 11.2%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 47.4% 14.2%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 47.4% 14.2%;
+    --popover-foreground: 210 40% 98%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 21.5%;
+    --input: 217.2 32.6% 21.5%;
+    --ring: 221.2 83.2% 53.3%;
+  }
+
+  :root[data-theme-color="green"] {
+    --primary: 142.1 76.2% 36.3%;
+    --ring: 142.1 76.2% 36.3%;
+    --theme-100: #dcfce7;
+    --theme-500: #22c55e;
+    --theme-600: #16a34a;
+    --theme-700: #15803d;
+  }
+
+  :root[data-theme-color="purple"] {
+    --primary: 262.1 83.3% 57.8%;
+    --ring: 262.1 83.3% 57.8%;
+    --theme-100: #ede9fe;
+    --theme-500: #8b5cf6;
+    --theme-600: #7c3aed;
+    --theme-700: #6d28d9;
+  }
+
+  :root[data-theme-color="orange"] {
+    --primary: 24.6 95% 53.1%;
+    --ring: 24.6 95% 53.1%;
+    --theme-100: #ffedd5;
+    --theme-500: #f97316;
+    --theme-600: #ea580c;
+    --theme-700: #c2410c;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    background: rgba(255, 255, 255, 0.78);
+    backdrop-filter: blur(20px);
+  }
+
+  .theme-surface {
+    background-color: var(--theme-100);
+    color: var(--theme-700);
+  }
+}
+
+.dark .dashboard-shell {
+  background-color: #020617;
+  color: #e2e8f0;
+}
+
+.dark .dashboard-shell .dashboard-sidebar,
+.dark .dashboard-shell .dashboard-mobile-header,
+.dark .dashboard-shell .dashboard-main {
+  background-color: #020617;
+}
+
+.dark .dashboard-shell .dashboard-sidebar,
+.dark .dashboard-shell .dashboard-mobile-header,
+.dark .dashboard-shell .dashboard-border,
+.dark .dashboard-shell .border,
+.dark .dashboard-shell .border-gray-200,
+.dark .dashboard-shell .border-gray-100,
+.dark .dashboard-shell .border-slate-200 {
+  border-color: #1e293b !important;
+}
+
+.dark .dashboard-shell .bg-white,
+.dark .dashboard-shell .bg-gray-50,
+.dark .dashboard-shell .bg-gray-100 {
+  background-color: #0f172a !important;
+}
+
+.dark .dashboard-shell .text-gray-900,
+.dark .dashboard-shell .text-slate-900,
+.dark .dashboard-shell .text-black {
+  color: #f8fafc !important;
+}
+
+.dark .dashboard-shell .text-gray-700,
+.dark .dashboard-shell .text-gray-600,
+.dark .dashboard-shell .text-gray-500,
+.dark .dashboard-shell .text-muted-foreground {
+  color: #94a3b8 !important;
+}
+
+.dark .dashboard-shell .hover\:bg-gray-100:hover,
+.dark .dashboard-shell .hover\:bg-gray-50:hover {
+  background-color: #172036 !important;
+}
+
+.dark .dashboard-shell .shadow-lg,
+.dark .dashboard-shell .shadow-xl,
+.dark .dashboard-shell .shadow-sm {
+  box-shadow: 0 18px 40px rgba(2, 6, 23, 0.45) !important;
+}
+
+:root .bg-unilink-600,
+:root .hover\:bg-unilink-700:hover,
+:root .text-unilink-600,
+:root .border-unilink-600,
+:root .bg-unilink-100,
+:root .text-unilink-700,
+:root .bg-unilink-500 {
+  transition: background-color 0.25s ease, border-color 0.25s ease, color 0.25s ease;
+}
+
+:root .bg-unilink-600 { background-color: var(--theme-600) !important; }
+:root .bg-unilink-500 { background-color: var(--theme-500) !important; }
+:root .bg-unilink-100 { background-color: var(--theme-100) !important; }
+:root .text-unilink-600 { color: var(--theme-600) !important; }
+:root .text-unilink-700 { color: var(--theme-700) !important; }
+:root .border-unilink-600 { border-color: var(--theme-600) !important; }
+:root .hover\:bg-unilink-700:hover { background-color: var(--theme-700) !important; }
