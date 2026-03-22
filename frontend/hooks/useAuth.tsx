@@ -30,6 +30,14 @@ const rememberedAccountsKey = "saved_login_accounts";
 const settingsKey = "unilink_settings";
 
 const applyStoredTheme = () => {
+  // Dark mode is only allowed when a user is actively logged in.
+  // On login / register pages (no token) always force light mode.
+  const token = localStorage.getItem("auth_token");
+  if (!token) {
+    document.documentElement.classList.remove("dark");
+    document.documentElement.setAttribute("data-theme-color", "blue");
+    return;
+  }
   const saved = JSON.parse(localStorage.getItem(settingsKey) || "{}");
   const darkModeEnabled = saved.darkModeEnabled ?? false;
   const themeColor = saved.themeColor ?? "blue";

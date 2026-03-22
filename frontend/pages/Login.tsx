@@ -69,7 +69,7 @@ const Login = () => {
   };
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-unilink-600 via-blue-600 to-purple-600 dark:from-slate-950 dark:via-slate-900 dark:to-slate-800 flex items-center justify-center p-4">
+    <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-unilink-600 via-blue-600 to-purple-600 flex items-center justify-center p-4">
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
         <div className="absolute left-[8%] top-[12%] h-40 w-40 rounded-full bg-white/10 blur-2xl animate-float" />
         <div className="absolute right-[10%] top-[20%] h-56 w-56 rounded-full bg-cyan-300/20 blur-3xl animate-pulse-glow" />
@@ -78,15 +78,15 @@ const Login = () => {
       </div>
       <div className="w-full max-w-md">
         {/* Login Card */}
-        <div className="relative bg-white/95 dark:bg-slate-900/95 backdrop-blur-sm rounded-2xl shadow-2xl p-8 border border-white/40 dark:border-slate-700">
+        <div className="relative bg-white/95 backdrop-blur-sm rounded-2xl shadow-2xl p-8 border border-white/40">
           {/* Logo */}
           <div className="text-center mb-8">
             <div className="flex justify-center mb-4">
               <Logo size="lg" showText={false} />
             </div>
             
-            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Welcome back</h1>
-            <p className="text-gray-600 dark:text-slate-300 mt-2">Sign in to your UniLink account</p>
+            <h1 className="text-2xl font-bold text-gray-900">Welcome back</h1>
+            <p className="text-gray-600 mt-2">Sign in to your UniLink account</p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-6">
@@ -151,14 +151,14 @@ const Login = () => {
                   checked={rememberMe}
                   onCheckedChange={(checked) => setRememberMe(checked as boolean)}
                 />
-                <Label htmlFor="remember-me" className="text-sm text-gray-600 dark:text-slate-300">
+                <Label htmlFor="remember-me" className="text-sm text-gray-600">
                   Remember me
                 </Label>
               </div>
               <span className="text-sm text-blue-100/0 text-unilink-600">Secure access</span>
             </div>
 
-            <div className="rounded-2xl border border-blue-100 bg-blue-50/40 px-4 py-5 dark:border-slate-700 dark:bg-slate-800/60">
+            <div className="rounded-2xl border border-blue-100 bg-blue-50/40 px-4 py-5">
               <AnimatedToggle
                 canActivate={Boolean(email.trim() && password.trim())}
                 isSubmitting={loading}
@@ -186,7 +186,7 @@ const Login = () => {
                 <div className="w-full border-t border-gray-300" />
               </div>
               <div className="relative flex justify-center text-sm">
-                <span className="px-2 bg-white dark:bg-slate-900 text-gray-500 dark:text-slate-300">Or continue with</span>
+                <span className="px-2 bg-white text-gray-500">Or continue with</span>
               </div>
             </div>
 

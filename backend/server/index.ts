@@ -3,7 +3,7 @@ import express from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import os from "node:os";
-import { Transform } from "node:stream";
+import { Writable } from "node:stream";
 import { z } from "zod";
 import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
 import { comparePassword, hashPassword, requireAuth, sanitizeUser, signToken, type AuthenticatedRequest } from "./auth.js";
@@ -696,26 +696,27 @@ app.post("/api/file-transfers/upload", requireAuth, async (req: AuthenticatedReq
   const transferId = createId();
   const storagePath = `${req.auth!.userId}/${transferId}-${sanitizeFilename(parsedHeaders.data["x-file-name"])}`;
 
-  // Buffer stream and count bytes via Transform (fixes race condition with dual listeners)
+  // Buffer the request body into memory, enforcing the size limit.
+  // Using Writable (not Transform) avoids backpressure from an unconsumed readable side.
   let bytesWritten = 0;
   const chunks: Buffer[] = [];
 
   try {
     await new Promise<void>((resolve, reject) => {
-      const counter = new Transform({
-        transform(chunk: Buffer, _enc, cb) {
+      const sink = new Writable({
+        write(chunk: Buffer, _enc, cb) {
           bytesWritten += chunk.length;
           if (bytesWritten > fileLimit) {
             cb(new Error(`File exceeds the ${formatLimitLabel(fileLimit)} plan limit.`));
           } else {
             chunks.push(chunk);
-            cb(null, chunk);
+            cb();
           }
         },
       });
-      req.pipe(counter);
-      counter.on("finish", resolve);
-      counter.on("error", reject);
+      req.pipe(sink);
+      sink.on("finish", resolve);
+      sink.on("error", reject);
       req.on("error", reject);
     });
   } catch (error) {
