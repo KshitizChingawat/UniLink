@@ -957,17 +957,6 @@ app.delete("/api/file-transfers/:id", requireAuth, async (req, res) => {
     await saveDb(db);
     res.status(204).send();
 });
-if (process.env.NODE_ENV === "production") {
-    const distPath = path.join(process.cwd(), "..", "frontend", "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res, next) => {
-        if (req.path.startsWith("/api/")) {
-            next();
-            return;
-        }
-        res.sendFile(path.join(distPath, "index.html"));
-    });
-}
 ensureDataDirs()
     .then(() => {
     app.listen(port, () => {
