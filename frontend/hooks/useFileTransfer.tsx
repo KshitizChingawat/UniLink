@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from './useAuth';
 import { toast } from 'sonner';
 import { apiFetch, ApiError, getApiUrl } from '@/lib/api';
@@ -106,7 +106,7 @@ export const useFileTransfer = () => {
   };
 
   // Fetch file transfers
-  const fetchTransfers = async () => {
+  const fetchTransfers = useCallback(async () => {
     if (!user) return;
 
     const token = localStorage.getItem('auth_token');
@@ -115,11 +115,12 @@ export const useFileTransfer = () => {
     try {
       const data = await apiFetch<FileTransfer[]>('/api/file-transfers');
       cachedTransfers = data || [];
+      cachedTransfersUserId = user.id;
       setTransfers(cachedTransfers);
     } catch (err) {
       console.error('Fetch transfers error:', err);
     }
-  };
+  }, [user]);
 
   // Start file transfer
   const startFileTransfer = async (
@@ -209,6 +210,13 @@ export const useFileTransfer = () => {
         xhr.send(file);
       });
 
+      const normalizedTransfer = {
+        ...data,
+        user_id: data.user_id || user.id,
+      };
+      cachedTransfers = [normalizedTransfer, ...cachedTransfers.filter((transfer) => transfer.id !== normalizedTransfer.id)];
+      cachedTransfersUserId = user.id;
+      setTransfers(cachedTransfers);
       await fetchTransfers();
       toast.success(`File transfer started: ${file.name}`);
       return data;
@@ -336,7 +344,25 @@ export const useFileTransfer = () => {
     return () => {
       active = false;
     };
-  }, [user]);
+  }, [user, fetchTransfers]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const refreshTransfers = () => {
+      fetchTransfers().catch(() => undefined);
+    };
+
+    const interval = window.setInterval(refreshTransfers, 5000);
+    window.addEventListener('focus', refreshTransfers);
+    document.addEventListener('visibilitychange', refreshTransfers);
+
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', refreshTransfers);
+      document.removeEventListener('visibilitychange', refreshTransfers);
+    };
+  }, [user, fetchTransfers]);
 
   return {
     transfers,

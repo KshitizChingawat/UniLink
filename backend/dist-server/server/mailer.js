@@ -10,6 +10,9 @@ const transporter = canSendMail
         host: SMTP_HOST,
         port: SMTP_PORT,
         secure: SMTP_PORT === 465,
+        connectionTimeout: 15000,
+        greetingTimeout: 15000,
+        socketTimeout: 20000,
         auth: {
             user: SMTP_USER,
             pass: SMTP_PASS,
@@ -21,20 +24,23 @@ export const sendRegistrationOtp = async (email, otp) => {
     if (!transporter || !SMTP_FROM) {
         throw new Error("Email verification is not configured on the server.");
     }
-    await transporter.sendMail({
-        from: SMTP_FROM,
-        to: email,
-        subject: "Your UniLink verification code",
-        text: `Your UniLink verification code is ${otp}. It expires in 10 minutes.`,
-        html: `
-      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #111827;">
-        <h2 style="margin-bottom: 8px;">Verify your UniLink email</h2>
-        <p>Use this one-time code to finish creating your account:</p>
-        <div style="display: inline-block; padding: 12px 18px; border-radius: 12px; background: #2563eb; color: white; font-size: 24px; font-weight: 700; letter-spacing: 6px;">
-          ${otp}
+    await Promise.race([
+        transporter.sendMail({
+            from: SMTP_FROM,
+            to: email,
+            subject: "Your UniLink verification code",
+            text: `Your UniLink verification code is ${otp}. It expires in 10 minutes.`,
+            html: `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #111827;">
+          <h2 style="margin-bottom: 8px;">Verify your UniLink email</h2>
+          <p>Use this one-time code to finish creating your account:</p>
+          <div style="display: inline-block; padding: 12px 18px; border-radius: 12px; background: #2563eb; color: white; font-size: 24px; font-weight: 700; letter-spacing: 6px;">
+            ${otp}
+          </div>
+          <p style="margin-top: 16px;">This code expires in 10 minutes.</p>
         </div>
-        <p style="margin-top: 16px;">This code expires in 10 minutes.</p>
-      </div>
-    `,
-    });
+      `,
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Email delivery timed out. Check SMTP settings and sender domain.")), 20000)),
+    ]);
 };

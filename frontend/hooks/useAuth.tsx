@@ -97,6 +97,20 @@ const isLikelyRealEmail = (email: string) => {
   return Boolean(domain) && !blockedEmailDomains.has(domain);
 };
 
+const fetchWithTimeout = async <T,>(input: string, init: RequestInit, timeoutMs = 20000) => {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await apiFetch<T>(input, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+};
+
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
@@ -261,14 +275,19 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
 
     try {
-      const data = await apiFetch<{ message: string }>("/api/auth/request-registration-otp", {
+      const data = await fetchWithTimeout<{ message: string }>("/api/auth/request-registration-otp", {
         method: "POST",
         body: JSON.stringify({ email: normalizedEmail }),
       });
       toast.success(data.message);
       return { error: null };
     } catch (err) {
-      const error = err instanceof Error ? err : new Error("Failed to send verification code");
+      const error =
+        err instanceof DOMException && err.name === "AbortError"
+          ? new Error("Sending the verification code took too long. Check the backend logs and SMTP settings.")
+          : err instanceof Error
+            ? err
+            : new Error("Failed to send verification code");
       toast.error(error.message || "Failed to send verification code");
       return { error };
     }

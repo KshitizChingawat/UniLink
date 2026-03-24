@@ -123,12 +123,13 @@ const Register = () => {
       return;
     }
 
+    setOtpSent(true);
+    setOtpVerified(false);
     setSendingOtp(true);
     const result = await requestRegistrationOtp(formData.email);
     setSendingOtp(false);
-    if (!result.error) {
-      setOtpSent(true);
-      setOtpVerified(false);
+    if (result.error) {
+      setOtpSent(false);
     }
   };
 

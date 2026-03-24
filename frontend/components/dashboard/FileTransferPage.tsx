@@ -44,28 +44,36 @@ const FileTransferPage = () => {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     multiple: true,
-    maxSize: uploadLimit
+    maxSize: uploadLimit,
+    noClick: true,
+    noKeyboard: true,
   });
 
-  const handleFileSelect = () => {
+  const handleFileSelect = (accept?: string) => {
+    if (fileInputRef.current) {
+      fileInputRef.current.accept = accept || '';
+    }
     fileInputRef.current?.click();
   };
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
+    const files = Array.from(event.target.files || []);
+    if (!files.length) {
+      return;
+    }
+
+    for (const file of files) {
       if (file.size > uploadLimit) {
         toast.error(upgradeLimitMessage);
-        if (fileInputRef.current) {
-          fileInputRef.current.value = '';
-        }
-        return;
+        continue;
       }
       const targetDevice = selectedDevice === 'all' ? undefined : selectedDevice;
       await startFileTransfer(file, targetDevice);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
+    }
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.accept = '';
     }
   };
 
@@ -262,7 +270,14 @@ const FileTransferPage = () => {
             <p className="text-sm text-gray-500 mb-4">
               Support for all file types up to {uploadLimitLabel}
             </p>
-            <Button type="button" onClick={handleFileSelect} disabled={loading}>
+            <Button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                handleFileSelect();
+              }}
+              disabled={loading}
+            >
               <Upload className="w-4 h-4 mr-2" />
               Select Files
             </Button>
@@ -365,19 +380,19 @@ const FileTransferPage = () => {
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Button variant="outline" type="button" className="h-auto p-4 flex flex-col items-center space-y-2" onClick={() => { fileInputRef.current?.setAttribute('accept', 'image/*'); handleFileSelect(); toast.info('Choose photos to send.'); }}>
+            <Button variant="outline" type="button" className="h-auto p-4 flex flex-col items-center space-y-2" onClick={() => { handleFileSelect('image/*'); toast.info('Choose photos to send.'); }}>
               <Image className="w-8 h-8" />
               <span>Send Photos</span>
             </Button>
-            <Button variant="outline" type="button" className="h-auto p-4 flex flex-col items-center space-y-2" onClick={() => { fileInputRef.current?.setAttribute('accept', 'video/*'); handleFileSelect(); toast.info('Choose a video to send.'); }}>
+            <Button variant="outline" type="button" className="h-auto p-4 flex flex-col items-center space-y-2" onClick={() => { handleFileSelect('video/*'); toast.info('Choose a video to send.'); }}>
               <Video className="w-8 h-8" />
               <span>Send Videos</span>
             </Button>
-            <Button variant="outline" type="button" className="h-auto p-4 flex flex-col items-center space-y-2" onClick={() => { fileInputRef.current?.setAttribute('accept', '.pdf,.doc,.docx,.txt'); handleFileSelect(); toast.info('Choose documents to send.'); }}>
+            <Button variant="outline" type="button" className="h-auto p-4 flex flex-col items-center space-y-2" onClick={() => { handleFileSelect('.pdf,.doc,.docx,.txt'); toast.info('Choose documents to send.'); }}>
               <FileText className="w-8 h-8" />
               <span>Send Documents</span>
             </Button>
-            <Button variant="outline" type="button" className="h-auto p-4 flex flex-col items-center space-y-2 md:col-span-3" onClick={() => { fileInputRef.current?.setAttribute('accept', '.zip,.rar,.7z,.tar'); handleFileSelect(); toast.info('Choose an archive to send.'); }}>
+            <Button variant="outline" type="button" className="h-auto p-4 flex flex-col items-center space-y-2 md:col-span-3" onClick={() => { handleFileSelect('.zip,.rar,.7z,.tar'); toast.info('Choose an archive to send.'); }}>
               <Archive className="w-8 h-8" />
               <span>Send Archive</span>
             </Button>
