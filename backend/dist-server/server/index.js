@@ -3,6 +3,9 @@ import express from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import os from "node:os";
+import path from "node:path";
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import { Writable } from "node:stream";
 import { z } from "zod";
 import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
@@ -24,6 +27,9 @@ app.use(cors({
         "X-Sender-Device-Id",
         "X-Receiver-Device-Id",
         "X-Transfer-Method",
+        "X-Upload-Id",
+        "X-Chunk-Index",
+        "X-Total-Chunks",
     ],
     exposedHeaders: ["Content-Disposition"],
     preflightContinue: false,
@@ -42,12 +48,12 @@ app.use(helmet({
 }));
 // Skip body parsing for the binary file upload route — it reads req stream directly
 app.use((req, res, next) => {
-    if (req.path === "/api/file-transfers/upload")
+    if (req.path === "/api/file-transfers/upload" || req.path === "/api/file-transfers/chunk")
         return next();
     express.json({ limit: "160mb" })(req, res, next);
 });
 app.use((req, res, next) => {
-    if (req.path === "/api/file-transfers/upload")
+    if (req.path === "/api/file-transfers/upload" || req.path === "/api/file-transfers/chunk")
         return next();
     express.urlencoded({ extended: true, limit: "160mb" })(req, res, next);
 });
@@ -121,6 +127,14 @@ const fileTransferSchema = z.object({
     receiverDeviceId: z.string().trim().optional(),
     transferMethod: z.enum(["cloud", "p2p", "local"]).default("cloud"),
 });
+const uploadInitSchema = z.object({
+    fileName: z.string().trim().min(1).max(180),
+    fileSize: z.coerce.number().int().positive().max(PRO_FILE_SIZE_LIMIT),
+    fileType: z.string().trim().max(120).optional(),
+    senderDeviceId: z.string().trim().min(1),
+    receiverDeviceId: z.string().trim().optional(),
+    transferMethod: z.enum(["cloud", "p2p", "local"]).default("cloud"),
+});
 const clipboardSchema = z.object({
     device_id: z.string().trim().min(1),
     content: z.string().min(1).max(10000),
@@ -152,6 +166,14 @@ const uploadHeadersSchema = z.object({
     "x-receiver-device-id": z.string().trim().optional(),
     "x-transfer-method": z.enum(["cloud", "p2p", "local"]).optional(),
 });
+const uploadChunkHeadersSchema = z.object({
+    "x-upload-id": z.string().trim().min(1),
+    "x-chunk-index": z.coerce.number().int().min(0),
+    "x-total-chunks": z.coerce.number().int().min(1),
+});
+const uploadSessions = new Map();
+const CHUNK_SIZE_BYTES = 8 * 1024 * 1024;
+const UPLOAD_TEMP_ROOT = path.join(os.tmpdir(), "unilink-upload-sessions");
 const isSubscriptionActive = (user) => user.role === "admin" ||
     (user.plan === "pro" &&
         Boolean(user.subscriptionExpiresAt) &&
@@ -227,6 +249,18 @@ const parseUploadHeaders = (headers) => uploadHeadersSchema.safeParse({
     "x-receiver-device-id": headers["x-receiver-device-id"],
     "x-transfer-method": headers["x-transfer-method"],
 });
+const parseUploadChunkHeaders = (headers) => uploadChunkHeadersSchema.safeParse({
+    "x-upload-id": headers["x-upload-id"],
+    "x-chunk-index": headers["x-chunk-index"],
+    "x-total-chunks": headers["x-total-chunks"],
+});
+const getUploadChunkPath = (session, chunkIndex) => path.join(session.tempDir, `${String(chunkIndex).padStart(6, "0")}.part`);
+const cleanupUploadSession = async (session) => {
+    if (!session)
+        return;
+    uploadSessions.delete(session.id);
+    await rm(session.tempDir, { recursive: true, force: true }).catch(() => undefined);
+};
 const userResponse = (user) => {
     refreshUserPlan(user);
     return sanitizeUser(user);
@@ -1036,6 +1070,168 @@ app.get("/api/file-transfers", requireAuth, async (req, res) => {
     res.json(db.fileTransfers
         .filter((transfer) => transfer.userId === req.auth.userId)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+});
+app.post("/api/file-transfers/initiate", requireAuth, async (req, res) => {
+    const parsed = uploadInitSchema.safeParse(req.body);
+    if (!parsed.success) {
+        res.status(400).json({ error: "Invalid upload metadata" });
+        return;
+    }
+    const db = await loadDb();
+    const user = db.users.find((entry) => entry.id === req.auth.userId);
+    if (!user) {
+        res.status(404).json({ error: "User not found" });
+        return;
+    }
+    if (refreshUserPlan(user)) {
+        await saveDb(db);
+    }
+    const fileLimit = getUserFileLimit(user);
+    if (parsed.data.fileSize > fileLimit) {
+        res.status(400).json({
+            error: getUploadLimitMessage(user, fileLimit),
+            fileLimit,
+            plan: isSubscriptionActive(user) ? "pro" : "free",
+        });
+        return;
+    }
+    const transferId = createId();
+    const uploadId = createId();
+    const tempDir = path.join(UPLOAD_TEMP_ROOT, uploadId);
+    await mkdir(tempDir, { recursive: true });
+    const session = {
+        id: uploadId,
+        userId: req.auth.userId,
+        transferId,
+        fileName: parsed.data.fileName,
+        fileSize: parsed.data.fileSize,
+        fileType: parsed.data.fileType,
+        senderDeviceId: parsed.data.senderDeviceId,
+        receiverDeviceId: parsed.data.receiverDeviceId,
+        transferMethod: parsed.data.transferMethod,
+        storagePath: `${req.auth.userId}/${transferId}-${sanitizeFilename(parsed.data.fileName)}`,
+        tempDir,
+        chunkSize: CHUNK_SIZE_BYTES,
+        totalChunks: Math.ceil(parsed.data.fileSize / CHUNK_SIZE_BYTES),
+        createdAt: nowIso(),
+    };
+    uploadSessions.set(uploadId, session);
+    res.status(201).json({
+        uploadId: session.id,
+        transferId: session.transferId,
+        chunkSize: session.chunkSize,
+        totalChunks: session.totalChunks,
+        fileLimit,
+        message: "Upload session ready.",
+    });
+});
+app.post("/api/file-transfers/chunk", requireAuth, async (req, res) => {
+    const parsed = parseUploadChunkHeaders(req.headers);
+    if (!parsed.success) {
+        res.status(400).json({ error: "Invalid upload chunk metadata" });
+        return;
+    }
+    const session = uploadSessions.get(parsed.data["x-upload-id"]);
+    if (!session || session.userId !== req.auth.userId) {
+        res.status(404).json({ error: "Upload session not found" });
+        return;
+    }
+    if (parsed.data["x-total-chunks"] !== session.totalChunks) {
+        res.status(400).json({ error: "Upload chunk count does not match the upload session." });
+        return;
+    }
+    const chunkIndex = parsed.data["x-chunk-index"];
+    if (chunkIndex >= session.totalChunks) {
+        res.status(400).json({ error: "Upload chunk index is out of range." });
+        return;
+    }
+    const chunkPath = getUploadChunkPath(session, chunkIndex);
+    try {
+        await new Promise((resolve, reject) => {
+            const writeStream = createWriteStream(chunkPath);
+            req.pipe(writeStream);
+            writeStream.on("finish", resolve);
+            writeStream.on("error", reject);
+            req.on("error", reject);
+        });
+        res.status(204).send();
+    }
+    catch (error) {
+        console.error("Chunk upload error:", error);
+        res.status(500).json({ error: "Failed to store upload chunk." });
+    }
+});
+app.post("/api/file-transfers/complete-upload", requireAuth, async (req, res) => {
+    const uploadId = typeof req.body?.uploadId === "string" ? req.body.uploadId : "";
+    if (!uploadId) {
+        res.status(400).json({ error: "Upload session ID is required." });
+        return;
+    }
+    const session = uploadSessions.get(uploadId);
+    if (!session || session.userId !== req.auth.userId) {
+        res.status(404).json({ error: "Upload session not found" });
+        return;
+    }
+    const assembledPath = path.join(session.tempDir, "assembled-upload.bin");
+    try {
+        const chunkFiles = (await readdir(session.tempDir))
+            .filter((entry) => entry.endsWith(".part"))
+            .sort();
+        if (chunkFiles.length !== session.totalChunks) {
+            res.status(400).json({ error: "Upload is incomplete. Some chunks are missing." });
+            return;
+        }
+        await new Promise((resolve, reject) => {
+            const output = createWriteStream(assembledPath);
+            const appendNext = (index) => {
+                if (index >= chunkFiles.length) {
+                    output.end();
+                    return;
+                }
+                const input = createReadStream(path.join(session.tempDir, chunkFiles[index]));
+                input.on("error", reject);
+                input.on("end", () => appendNext(index + 1));
+                input.pipe(output, { end: false });
+            };
+            output.on("finish", resolve);
+            output.on("error", reject);
+            appendNext(0);
+        });
+        const { error: uploadError } = await supabase.storage
+            .from(FILE_BUCKET)
+            .upload(session.storagePath, createReadStream(assembledPath), {
+            contentType: session.fileType || "application/octet-stream",
+            upsert: false,
+        });
+        if (uploadError) {
+            console.error("Supabase Storage chunked upload error:", uploadError);
+            res.status(500).json({ error: "Failed to store file. Please try again." });
+            return;
+        }
+        const db = await loadDb();
+        const transfer = {
+            id: session.transferId,
+            userId: req.auth.userId,
+            senderDeviceId: session.senderDeviceId,
+            receiverDeviceId: session.receiverDeviceId,
+            fileName: session.fileName,
+            fileSize: session.fileSize,
+            fileType: session.fileType,
+            transferStatus: "completed",
+            transferMethod: session.transferMethod,
+            createdAt: session.createdAt,
+            completedAt: nowIso(),
+            filePath: session.storagePath,
+        };
+        db.fileTransfers.unshift(transfer);
+        await saveDb(db);
+        await cleanupUploadSession(session);
+        res.status(201).json(transfer);
+    }
+    catch (error) {
+        console.error("Complete upload error:", error);
+        res.status(500).json({ error: "Failed to finalize upload." });
+    }
 });
 app.post("/api/file-transfers/upload", requireAuth, async (req, res) => {
     const parsedHeaders = parseUploadHeaders(req.headers);

@@ -27,6 +27,7 @@ export const useFileTransfer = () => {
   const [loading, setLoading] = useState(() => !cachedTransfers.length);
   const [uploadProgress, setUploadProgress] = useState<{ [key: string]: number }>({});
   const { user } = useAuth();
+  const chunkSizeThreshold = 25 * 1024 * 1024;
 
   const getCurrentDeviceId = (): string | null => {
     if (typeof window === 'undefined') return null;
@@ -149,66 +150,130 @@ export const useFileTransfer = () => {
         [file.name]: 0,
       }));
 
-      const data = await new Promise<FileTransfer>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', getApiUrl('/api/file-transfers/upload'));
-        xhr.responseType = 'json';
-        xhr.setRequestHeader('Authorization', `Bearer ${token}`);
-        xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
-        xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
-        xhr.setRequestHeader('X-File-Size', String(file.size));
-        xhr.setRequestHeader('X-File-Type', file.type || 'application/octet-stream');
-        xhr.setRequestHeader('X-Sender-Device-Id', currentDeviceId);
-        xhr.setRequestHeader('X-Transfer-Method', transferMethod);
-        if (targetDeviceId) {
-          xhr.setRequestHeader('X-Receiver-Device-Id', targetDeviceId);
-        }
+      let data: FileTransfer;
 
-        xhr.upload.onprogress = (event) => {
-          if (!event.lengthComputable) return;
-          const percent = Math.round((event.loaded / event.total) * 100);
+      if (file.size > chunkSizeThreshold) {
+        const init = await apiFetch<{
+          uploadId: string;
+          chunkSize: number;
+          totalChunks: number;
+        }>('/api/file-transfers/initiate', {
+          method: 'POST',
+          body: JSON.stringify({
+            fileName: file.name,
+            fileSize: file.size,
+            fileType: file.type || 'application/octet-stream',
+            senderDeviceId: currentDeviceId,
+            receiverDeviceId: targetDeviceId,
+            transferMethod,
+          }),
+        });
+
+        let uploadedBytes = 0;
+        for (let chunkIndex = 0; chunkIndex < init.totalChunks; chunkIndex += 1) {
+          const start = chunkIndex * init.chunkSize;
+          const end = Math.min(file.size, start + init.chunkSize);
+          const chunk = file.slice(start, end);
+
+          const response = await fetch(getApiUrl('/api/file-transfers/chunk'), {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/octet-stream',
+              'X-Upload-Id': init.uploadId,
+              'X-Chunk-Index': String(chunkIndex),
+              'X-Total-Chunks': String(init.totalChunks),
+            },
+            body: chunk,
+          });
+
+          if (!response.ok) {
+            let message = 'Failed to upload file chunk';
+            try {
+              const payload = await response.json();
+              if (payload && typeof payload === 'object' && 'error' in payload) {
+                message = String((payload as Record<string, unknown>).error);
+              }
+            } catch {
+              // ignore JSON parse failure
+            }
+            throw new ApiError(message, response.status || 400);
+          }
+
+          uploadedBytes += chunk.size;
+          const percent = Math.min(99, Math.round((uploadedBytes / file.size) * 100));
           setUploadProgress((current) => ({
             ...current,
             [file.name]: percent,
           }));
-        };
+        }
 
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            const response = xhr.response as FileTransfer;
-            resolve(response);
-            return;
+        data = await apiFetch<FileTransfer>('/api/file-transfers/complete-upload', {
+          method: 'POST',
+          body: JSON.stringify({ uploadId: init.uploadId }),
+        });
+      } else {
+        data = await new Promise<FileTransfer>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', getApiUrl('/api/file-transfers/upload'));
+          xhr.responseType = 'json';
+          xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+          xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+          xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
+          xhr.setRequestHeader('X-File-Size', String(file.size));
+          xhr.setRequestHeader('X-File-Type', file.type || 'application/octet-stream');
+          xhr.setRequestHeader('X-Sender-Device-Id', currentDeviceId);
+          xhr.setRequestHeader('X-Transfer-Method', transferMethod);
+          if (targetDeviceId) {
+            xhr.setRequestHeader('X-Receiver-Device-Id', targetDeviceId);
           }
 
-          const payload =
-            typeof xhr.response === 'object' && xhr.response
-              ? xhr.response
-              : (() => {
-                  try {
-                    return JSON.parse(xhr.responseText);
-                  } catch {
-                    return null;
-                  }
-                })();
+          xhr.upload.onprogress = (event) => {
+            if (!event.lengthComputable) return;
+            const percent = Math.round((event.loaded / event.total) * 100);
+            setUploadProgress((current) => ({
+              ...current,
+              [file.name]: percent,
+            }));
+          };
 
-          const message =
-            payload && typeof payload === 'object' && 'error' in payload
-              ? String((payload as Record<string, unknown>).error)
-              : 'Failed to start file transfer';
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              const response = xhr.response as FileTransfer;
+              resolve(response);
+              return;
+            }
 
-          reject(new ApiError(message, xhr.status || 400));
-        };
+            const payload =
+              typeof xhr.response === 'object' && xhr.response
+                ? xhr.response
+                : (() => {
+                    try {
+                      return JSON.parse(xhr.responseText);
+                    } catch {
+                      return null;
+                    }
+                  })();
 
-        xhr.onerror = () => {
-          reject(new Error('Upload failed. Check your connection or deployment API settings.'));
-        };
+            const message =
+              payload && typeof payload === 'object' && 'error' in payload
+                ? String((payload as Record<string, unknown>).error)
+                : 'Failed to start file transfer';
 
-        xhr.onabort = () => {
-          reject(new Error('Upload was cancelled'));
-        };
+            reject(new ApiError(message, xhr.status || 400));
+          };
 
-        xhr.send(file);
-      });
+          xhr.onerror = () => {
+            reject(new Error('Upload failed. Check your connection or deployment API settings.'));
+          };
+
+          xhr.onabort = () => {
+            reject(new Error('Upload was cancelled'));
+          };
+
+          xhr.send(file);
+        });
+      }
 
       const normalizedTransfer = {
         ...data,
@@ -218,7 +283,11 @@ export const useFileTransfer = () => {
       cachedTransfersUserId = user.id;
       setTransfers(cachedTransfers);
       await fetchTransfers();
-      toast.success(`File transfer started: ${file.name}`);
+      setUploadProgress((current) => ({
+        ...current,
+        [file.name]: 100,
+      }));
+      toast.success(`File transfer completed: ${file.name}`);
       return data;
     } catch (err) {
       console.error('Start transfer error:', err);
