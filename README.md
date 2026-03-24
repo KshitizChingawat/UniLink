@@ -91,40 +91,6 @@ UniLink/
 └── README.md
 ```
 
----
-
-## 🚀 Getting Started
-
-### 1️⃣ Clone the Repository
-
-```
-git clone https://github.com/KshitizChingawat/UniLink.git
-cd UniLink
-```
-
----
-
-### 2️⃣ Setup Backend
-
-```
-cd backend
-npm install
-npm run build
-npm start
-```
-
----
-
-### 3️⃣ Setup Frontend
-
-```
-cd frontend
-npm install
-npm run dev
-```
-
----
-
 ## 🌍 Live Demo
 
 🚀 **Try UniLink Now:**
