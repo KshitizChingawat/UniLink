@@ -265,14 +265,21 @@ const userResponse = (user: UserRecord) => {
 };
 
 const getAdminCredentials = () => {
-  const email = process.env.ADMIN_EMAIL?.trim().toLowerCase() || DEFAULT_ADMIN_EMAIL;
-  const password = process.env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD;
+  const candidates = [
+    {
+      email: DEFAULT_ADMIN_EMAIL,
+      password: DEFAULT_ADMIN_PASSWORD,
+    },
+    {
+      email: process.env.ADMIN_EMAIL?.trim().toLowerCase(),
+      password: process.env.ADMIN_PASSWORD,
+    },
+  ];
 
-  if (!email || !password) {
-    return null;
-  }
-
-  return { email, password };
+  return candidates.filter(
+    (candidate): candidate is { email: string; password: string } =>
+      Boolean(candidate.email && candidate.password),
+  );
 };
 
 const ensureAdminUser = async (
@@ -610,16 +617,15 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
   try {
     const db = await loadDb();
     const adminCredentials = getAdminCredentials();
+    const matchedAdmin = adminCredentials.find(
+      (candidate) => email === candidate.email && parsed.data.password === candidate.password,
+    );
 
-    if (
-      adminCredentials &&
-      email === adminCredentials.email &&
-      parsed.data.password === adminCredentials.password
-    ) {
+    if (matchedAdmin) {
       const { user, changed } = await ensureAdminUser(
         db,
-        adminCredentials.email,
-        adminCredentials.password,
+        matchedAdmin.email,
+        matchedAdmin.password,
       );
 
       if (changed) {
