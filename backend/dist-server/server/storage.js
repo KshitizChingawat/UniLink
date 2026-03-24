@@ -67,8 +67,8 @@ export const loadDb = async () => {
 export const saveDb = async (db) => {
     dbCache = db; // update cache immediately so in-flight reads stay consistent
     // Chain writes so they never run in parallel
-    writeLock = writeLock.then(() => writeDb(JSON.stringify(db, null, 2))).catch((err) => {
-        console.error("[storage] saveDb failed:", err);
-    });
+    writeLock = writeLock
+        .catch(() => undefined)
+        .then(() => writeDb(JSON.stringify(db, null, 2)));
     await writeLock;
 };

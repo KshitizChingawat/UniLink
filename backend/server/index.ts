@@ -147,6 +147,36 @@ const isSubscriptionActive = (user: UserRecord) =>
   Boolean(user.subscriptionExpiresAt) &&
   new Date(user.subscriptionExpiresAt).getTime() > Date.now();
 
+const blockedEmailDomains = new Set([
+  "example.com",
+  "example.org",
+  "example.net",
+  "test.com",
+  "invalid.com",
+  "fake.com",
+  "mailinator.com",
+  "tempmail.com",
+  "10minutemail.com",
+  "yopmail.com",
+  "guerrillamail.com",
+  "sharklasers.com",
+]);
+
+const normalizeEmail = (email: string) => email.trim().toLowerCase();
+
+const isLikelyRealEmail = (email: string) => {
+  const normalized = normalizeEmail(email);
+  const [, domain = ""] = normalized.split("@");
+  return Boolean(domain) && !blockedEmailDomains.has(domain);
+};
+
+const assertValidEmailAddress = (email: string) => {
+  if (!isLikelyRealEmail(email)) {
+    return "Enter a valid email address";
+  }
+  return null;
+};
+
 const refreshUserPlan = (user: UserRecord) => {
   if (user.plan === "pro" && !isSubscriptionActive(user)) {
     user.plan = "free";
@@ -269,98 +299,33 @@ app.get("/api/health", async (_req, res) => {
 app.post("/api/auth/register", authLimiter, async (req, res) => {
   const parsed = registerSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: "Invalid registration details" });
+    res.status(400).json({ error: "Enter a valid email address" });
     return;
   }
 
-  const db = await loadDb();
-  const email = parsed.data.email.toLowerCase();
-  if (db.users.some((user) => user.email === email)) {
-    res.json({ error: "Email is already registered", duplicateEmail: true });
+  const email = normalizeEmail(parsed.data.email);
+  const emailError = assertValidEmailAddress(email);
+  if (emailError) {
+    res.status(400).json({ error: emailError });
     return;
   }
 
-  const timestamp = nowIso();
-  const user: UserRecord = {
-    id: createId(),
-    email,
-    firstName: parsed.data.firstName,
-    lastName: parsed.data.lastName,
-    passwordHash: await hashPassword(parsed.data.password),
-    createdAt: timestamp,
-    updatedAt: timestamp,
-    plan: "free",
-    preferences: {
-      aiAssistantEnabled: true,
-    },
-  };
+  try {
+    const db = await loadDb();
+    if (db.users.some((user) => user.email === email)) {
+      res.json({ error: "Email is already registered", duplicateEmail: true });
+      return;
+    }
 
-  db.users.push(user);
-  await saveDb(db);
-
-  res.status(201).json({
-    token: signToken(user),
-    user: userResponse(user),
-  });
-});
-
-app.post("/api/auth/login", authLimiter, async (req, res) => {
-  const parsed = loginSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: "Invalid login request" });
-    return;
-  }
-
-  const db = await loadDb();
-  const email = parsed.data.email.toLowerCase();
-  const user = db.users.find((entry) => entry.email === email);
-
-  if (!user || !(await comparePassword(parsed.data.password, user.passwordHash))) {
-    res.status(401).json({ error: "Invalid credentials" });
-    return;
-  }
-
-  if (refreshUserPlan(user)) {
-    await saveDb(db);
-  }
-
-  res.json({
-    token: signToken(user, parsed.data.rememberMe),
-    user: userResponse(user),
-  });
-});
-
-app.post("/api/auth/google", authLimiter, async (req, res) => {
-  const parsed = googleAuthSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: "Invalid Google login request" });
-    return;
-  }
-
-  const email = parsed.data.email.toLowerCase();
-  if (!email.endsWith("@gmail.com") && !email.endsWith("@googlemail.com")) {
-    res.status(400).json({ error: "Use a valid Google Gmail address" });
-    return;
-  }
-
-  const db = await loadDb();
-  let user = db.users.find((entry) => entry.email === email);
-
-  if (!user) {
-    const localPart = email.split("@")[0];
-    const [firstName = "Google", lastName = "User"] = localPart
-      .split(/[.\-_]/)
-      .filter(Boolean)
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1));
-
-    user = {
+    const timestamp = nowIso();
+    const user: UserRecord = {
       id: createId(),
       email,
-      firstName,
-      lastName,
-      passwordHash: await hashPassword(createId()),
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
+      firstName: parsed.data.firstName.trim(),
+      lastName: parsed.data.lastName.trim(),
+      passwordHash: await hashPassword(parsed.data.password),
+      createdAt: timestamp,
+      updatedAt: timestamp,
       plan: "free",
       preferences: {
         aiAssistantEnabled: true,
@@ -369,16 +334,108 @@ app.post("/api/auth/google", authLimiter, async (req, res) => {
 
     db.users.push(user);
     await saveDb(db);
+
+    res.status(201).json({
+      token: signToken(user),
+      user: userResponse(user),
+    });
+  } catch (error) {
+    console.error("Registration persistence error:", error);
+    res.status(500).json({ error: "Failed to create your account. Please try again." });
+  }
+});
+
+app.post("/api/auth/login", authLimiter, async (req, res) => {
+  const parsed = loginSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Enter a valid email address" });
+    return;
   }
 
-  if (refreshUserPlan(user)) {
-    await saveDb(db);
+  const email = normalizeEmail(parsed.data.email);
+  const emailError = assertValidEmailAddress(email);
+  if (emailError) {
+    res.status(400).json({ error: emailError });
+    return;
   }
 
-  res.json({
-    token: signToken(user, parsed.data.rememberMe),
-    user: userResponse(user),
-  });
+  try {
+    const db = await loadDb();
+    const user = db.users.find((entry) => normalizeEmail(entry.email) === email);
+
+    if (!user || !(await comparePassword(parsed.data.password, user.passwordHash))) {
+      res.status(401).json({ error: "Invalid credentials" });
+      return;
+    }
+
+    if (refreshUserPlan(user)) {
+      await saveDb(db);
+    }
+
+    res.json({
+      token: signToken(user, parsed.data.rememberMe),
+      user: userResponse(user),
+    });
+  } catch (error) {
+    console.error("Login lookup error:", error);
+    res.status(500).json({ error: "Unable to sign in right now. Please try again." });
+  }
+});
+
+app.post("/api/auth/google", authLimiter, async (req, res) => {
+  const parsed = googleAuthSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Enter a valid email address" });
+    return;
+  }
+
+  const email = normalizeEmail(parsed.data.email);
+  if (!email.endsWith("@gmail.com") && !email.endsWith("@googlemail.com")) {
+    res.status(400).json({ error: "Use a valid Google Gmail address" });
+    return;
+  }
+
+  try {
+    const db = await loadDb();
+    let user = db.users.find((entry) => normalizeEmail(entry.email) === email);
+
+    if (!user) {
+      const localPart = email.split("@")[0];
+      const [firstName = "Google", lastName = "User"] = localPart
+        .split(/[.\-_]/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1));
+
+      user = {
+        id: createId(),
+        email,
+        firstName,
+        lastName,
+        passwordHash: await hashPassword(createId()),
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+        plan: "free",
+        preferences: {
+          aiAssistantEnabled: true,
+        },
+      };
+
+      db.users.push(user);
+      await saveDb(db);
+    }
+
+    if (refreshUserPlan(user)) {
+      await saveDb(db);
+    }
+
+    res.json({
+      token: signToken(user, parsed.data.rememberMe),
+      user: userResponse(user),
+    });
+  } catch (error) {
+    console.error("Google auth persistence error:", error);
+    res.status(500).json({ error: "Unable to sign in with Google right now." });
+  }
 });
 
 app.post("/api/auth/forgot-password", authLimiter, async (req, res) => {
@@ -388,16 +445,27 @@ app.post("/api/auth/forgot-password", authLimiter, async (req, res) => {
     return;
   }
 
-  const db = await loadDb();
-  const email = parsed.data.email.toLowerCase();
-  const user = db.users.find((entry) => entry.email === email);
+  const email = normalizeEmail(parsed.data.email);
+  const emailError = assertValidEmailAddress(email);
+  if (emailError) {
+    res.status(400).json({ error: emailError });
+    return;
+  }
 
-  res.json({
-    success: true,
-    message: user
-      ? "Password reset support has been initiated for this account."
-      : "If an account exists for this email, password reset support has been initiated.",
-  });
+  try {
+    const db = await loadDb();
+    const user = db.users.find((entry) => normalizeEmail(entry.email) === email);
+
+    res.json({
+      success: true,
+      message: user
+        ? "Password reset support has been initiated for this account."
+        : "If an account exists for this email, password reset support has been initiated.",
+    });
+  } catch (error) {
+    console.error("Forgot password lookup error:", error);
+    res.status(500).json({ error: "Unable to start password reset support right now." });
+  }
 });
 
 app.get("/api/auth/me", requireAuth, async (req: AuthenticatedRequest, res) => {
@@ -551,7 +619,12 @@ app.patch("/api/auth/profile", requireAuth, async (req: AuthenticatedRequest, re
   }
 
   if (parsed.data.email) {
-    const normalizedEmail = parsed.data.email.toLowerCase();
+    const normalizedEmail = normalizeEmail(parsed.data.email);
+    const emailError = assertValidEmailAddress(normalizedEmail);
+    if (emailError) {
+      res.status(400).json({ error: emailError });
+      return;
+    }
     const duplicateUser = db.users.find((entry) => entry.id !== user.id && entry.email === normalizedEmail);
     if (duplicateUser) {
       res.status(409).json({ error: "Email is already registered" });

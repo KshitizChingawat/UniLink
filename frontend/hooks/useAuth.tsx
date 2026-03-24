@@ -28,6 +28,20 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 const rememberedAccountsKey = "saved_login_accounts";
 const settingsKey = "unilink_settings";
+const blockedEmailDomains = new Set([
+  "example.com",
+  "example.org",
+  "example.net",
+  "test.com",
+  "invalid.com",
+  "fake.com",
+  "mailinator.com",
+  "tempmail.com",
+  "10minutemail.com",
+  "yopmail.com",
+  "guerrillamail.com",
+  "sharklasers.com",
+]);
 
 const applyStoredTheme = () => {
   // Dark mode is only allowed when a user is actively logged in.
@@ -60,6 +74,12 @@ const persistRememberedAccount = (email: string, password: string) => {
   });
 
   localStorage.setItem(rememberedAccountsKey, JSON.stringify(filtered.slice(0, 5)));
+};
+
+const isLikelyRealEmail = (email: string) => {
+  const normalized = email.trim().toLowerCase();
+  const [, domain = ""] = normalized.split("@");
+  return Boolean(domain) && !blockedEmailDomains.has(domain);
 };
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
@@ -115,6 +135,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   const signIn = async (email: string, password: string, rememberMe: boolean = false) => {
     const normalizedEmail = email.trim().toLowerCase();
+    if (!isLikelyRealEmail(normalizedEmail)) {
+      const error = new Error("Enter a valid email address");
+      toast.error(error.message);
+      return { error, shouldRedirect: false };
+    }
     try {
       const data = await apiFetch<{ token: string; user: User }>("/api/auth/login", {
         method: "POST",
@@ -143,15 +168,21 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   const signInWithGoogle = async (email: string, rememberMe: boolean = true) => {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!isLikelyRealEmail(normalizedEmail)) {
+      const error = new Error("Enter a valid email address");
+      toast.error(error.message);
+      return { error };
+    }
     try {
       const data = await apiFetch<{ token: string; user: User }>("/api/auth/google", {
         method: "POST",
-        body: JSON.stringify({ email, rememberMe }),
+        body: JSON.stringify({ email: normalizedEmail, rememberMe }),
       });
 
       localStorage.setItem("auth_token", data.token);
       localStorage.setItem("user_data", JSON.stringify(data.user));
-      persistRememberedEmail(email, rememberMe);
+      persistRememberedEmail(normalizedEmail, rememberMe);
       setUser(data.user);
       toast.success("Signed in with Google successfully!");
       setTimeout(() => navigate("/dashboard"), 100);
@@ -165,6 +196,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   const signUp = async (email: string, password: string, firstName: string, lastName: string) => {
     const normalizedEmail = email.trim().toLowerCase();
+    if (!isLikelyRealEmail(normalizedEmail)) {
+      const error = new Error("Enter a valid email address");
+      toast.error(error.message);
+      return { error };
+    }
     try {
       const data = await apiFetch<{ token?: string; user?: User; error?: string; duplicateEmail?: boolean }>("/api/auth/register", {
         method: "POST",
@@ -188,6 +224,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
       localStorage.setItem("auth_token", data.token);
       localStorage.setItem("user_data", JSON.stringify(data.user));
+      persistRememberedEmail(normalizedEmail, true);
+      persistRememberedAccount(normalizedEmail, password);
       setUser(data.user);
       toast.success("Account created and signed in successfully!");
       setTimeout(() => navigate("/dashboard"), 100);

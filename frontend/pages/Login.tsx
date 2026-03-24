@@ -13,6 +13,21 @@ import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { apiFetch } from '@/lib/api';
 
+const blockedEmailDomains = new Set([
+  'example.com',
+  'example.org',
+  'example.net',
+  'test.com',
+  'invalid.com',
+  'fake.com',
+  'mailinator.com',
+  'tempmail.com',
+  '10minutemail.com',
+  'yopmail.com',
+  'guerrillamail.com',
+  'sharklasers.com',
+]);
+
 const Login = () => {
   const rememberedAccounts = JSON.parse(localStorage.getItem('saved_login_accounts') || '[]') as Array<{
     email: string;
@@ -28,6 +43,12 @@ const Login = () => {
   const [forgotEmail, setForgotEmail] = useState('');
   const [forgotLoading, setForgotLoading] = useState(false);
   const { signIn, signInWithGoogle } = useAuth();
+  const normalizedEmail = email.trim().toLowerCase();
+  const emailLooksValid =
+    !email || (
+      /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) &&
+      !blockedEmailDomains.has(normalizedEmail.split('@')[1] || '')
+    );
 
   const hydrateRememberedAccount = (selectedEmail: string) => {
     const selected = rememberedAccounts.find((account) => account.email === selectedEmail);
@@ -40,6 +61,11 @@ const Login = () => {
   const performLogin = async () => {
     if (!email.trim() || !password.trim()) {
       toast.error('Enter your email and password to continue.');
+      return false;
+    }
+
+    if (!emailLooksValid) {
+      toast.error('Enter a valid email address');
       return false;
     }
 
@@ -139,6 +165,7 @@ const Login = () => {
                 }}
                 placeholder="Enter your email"
                 className="mt-1"
+                autoComplete="email"
                 required
               />
               <datalist id="remembered-emails">
@@ -146,6 +173,9 @@ const Login = () => {
                   <option key={account.email} value={account.email} />
                 ))}
               </datalist>
+              {!emailLooksValid && (
+                <p className="mt-2 text-sm text-red-600">Enter a valid email address</p>
+              )}
             </div>
 
             <div>

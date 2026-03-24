@@ -10,6 +10,21 @@ import { useAuth } from '@/hooks/useAuth';
 import Logo from '@/components/Logo';
 import { toast } from 'sonner';
 
+const blockedEmailDomains = new Set([
+  'example.com',
+  'example.org',
+  'example.net',
+  'test.com',
+  'invalid.com',
+  'fake.com',
+  'mailinator.com',
+  'tempmail.com',
+  '10minutemail.com',
+  'yopmail.com',
+  'guerrillamail.com',
+  'sharklasers.com',
+]);
+
 const Register = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
@@ -36,9 +51,18 @@ const Register = () => {
   ];
 
   const isPasswordValid = passwordRules.every((rule) => rule.valid);
+  const normalizedEmail = formData.email.trim().toLowerCase();
+  const emailLooksValid =
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) &&
+    !blockedEmailDomains.has(normalizedEmail.split('@')[1] || '');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (!emailLooksValid) {
+      toast.error('Enter a valid email address');
+      return;
+    }
 
     if (!isPasswordValid) {
       toast.error('Password must be at least 8 characters and include a special symbol.');
@@ -146,8 +170,12 @@ const Register = () => {
                 onChange={(e) => handleInputChange('email', e.target.value)}
                 placeholder="john@example.com"
                 className="mt-1"
+                autoComplete="email"
                 required
               />
+              {formData.email && !emailLooksValid && (
+                <p className="mt-2 text-sm text-red-600">Enter a valid email address</p>
+              )}
             </div>
 
             <div>
