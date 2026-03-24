@@ -111,3 +111,13 @@ export const sendRegistrationOtp = async (email: string, otp: string) => {
     ),
   ]);
 };
+
+export const isMailtrapDemoRestrictionError = (error: unknown) => {
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+
+  return (
+    message.includes("Demo domains can only be used to send emails to account owners") ||
+    message.includes("You can only send testing emails to your own email address")
+  );
+};

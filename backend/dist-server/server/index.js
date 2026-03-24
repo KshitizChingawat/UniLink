@@ -6,7 +6,7 @@ import os from "node:os";
 import { Writable } from "node:stream";
 import { z } from "zod";
 import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
-import { isEmailVerificationConfigured, sendRegistrationOtp } from "./mailer.js";
+import { isEmailVerificationConfigured, isMailtrapDemoRestrictionError, sendRegistrationOtp } from "./mailer.js";
 import { comparePassword, hashPassword, requireAuth, sanitizeUser, signToken } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
 import { nowIso, sanitizeFilename } from "./helpers.js";
@@ -34,6 +34,7 @@ const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 25, standardHeade
 const FREE_FILE_SIZE_LIMIT = 100 * 1024 * 1024;
 const PRO_FILE_SIZE_LIMIT = 10 * 1024 * 1024 * 1024;
 const MONTH_IN_MS = 30 * 24 * 60 * 60 * 1000;
+const OTP_FALLBACK_ENABLED = process.env.ALLOW_OTP_FALLBACK !== "false";
 app.use(helmet({
     crossOriginResourcePolicy: false,
 }));
@@ -133,9 +134,10 @@ const uploadHeadersSchema = z.object({
     "x-receiver-device-id": z.string().trim().optional(),
     "x-transfer-method": z.enum(["cloud", "p2p", "local"]).optional(),
 });
-const isSubscriptionActive = (user) => user.plan === "pro" &&
-    Boolean(user.subscriptionExpiresAt) &&
-    new Date(user.subscriptionExpiresAt).getTime() > Date.now();
+const isSubscriptionActive = (user) => user.role === "admin" ||
+    (user.plan === "pro" &&
+        Boolean(user.subscriptionExpiresAt) &&
+        new Date(user.subscriptionExpiresAt).getTime() > Date.now());
 const blockedEmailDomains = new Set([
     "example.com",
     "example.org",
@@ -173,6 +175,14 @@ const consumeExpiredEmailVerifications = (db) => {
     db.emailVerifications = db.emailVerifications.filter((entry) => new Date(entry.expiresAt).getTime() > Date.now());
 };
 const refreshUserPlan = (user) => {
+    if (user.role === "admin") {
+        if (user.plan !== "pro") {
+            user.plan = "pro";
+            user.updatedAt = nowIso();
+            return true;
+        }
+        return false;
+    }
     if (user.plan === "pro" && !isSubscriptionActive(user)) {
         user.plan = "free";
         user.subscriptionStartedAt = undefined;
@@ -200,6 +210,65 @@ const parseUploadHeaders = (headers) => uploadHeadersSchema.safeParse({
 const userResponse = (user) => {
     refreshUserPlan(user);
     return sanitizeUser(user);
+};
+const getAdminCredentials = () => {
+    const email = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+    const password = process.env.ADMIN_PASSWORD;
+    if (!email || !password) {
+        return null;
+    }
+    return { email, password };
+};
+const ensureAdminUser = async (db, email, password) => {
+    const timestamp = nowIso();
+    const subscriptionExpiresAt = new Date(Date.now() + MONTH_IN_MS).toISOString();
+    let user = db.users.find((entry) => normalizeEmail(entry.email) === email) || null;
+    if (!user) {
+        user = {
+            id: createId(),
+            email,
+            firstName: "UniLink",
+            lastName: "Admin",
+            passwordHash: await hashPassword(password),
+            role: "admin",
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            plan: "pro",
+            subscriptionStartedAt: timestamp,
+            subscriptionExpiresAt,
+            preferences: {
+                aiAssistantEnabled: true,
+            },
+        };
+        db.users.push(user);
+        return { user, changed: true };
+    }
+    let changed = false;
+    if (!(await comparePassword(password, user.passwordHash))) {
+        user.passwordHash = await hashPassword(password);
+        changed = true;
+    }
+    if (user.role !== "admin") {
+        user.role = "admin";
+        changed = true;
+    }
+    if (user.plan !== "pro") {
+        user.plan = "pro";
+        changed = true;
+    }
+    if (user.firstName !== "UniLink") {
+        user.firstName = "UniLink";
+        changed = true;
+    }
+    if (user.lastName !== "Admin") {
+        user.lastName = "Admin";
+        changed = true;
+    }
+    user.subscriptionStartedAt = timestamp;
+    user.subscriptionExpiresAt = subscriptionExpiresAt;
+    user.updatedAt = timestamp;
+    changed = true;
+    return { user, changed };
 };
 const findUser = async (userId) => {
     const db = await loadDb();
@@ -305,11 +374,26 @@ app.post("/api/auth/request-registration-otp", authLimiter, async (req, res) => 
         db.emailVerifications = db.emailVerifications.filter((entry) => !(entry.email === email && entry.purpose === "register"));
         db.emailVerifications.unshift(verification);
         await saveDb(db);
-        await sendRegistrationOtp(email, otp);
-        res.json({
-            success: true,
-            message: "Verification code sent to your email.",
-        });
+        try {
+            await sendRegistrationOtp(email, otp);
+            res.json({
+                success: true,
+                message: "Verification code sent to your email.",
+            });
+            return;
+        }
+        catch (mailError) {
+            if (OTP_FALLBACK_ENABLED && isMailtrapDemoRestrictionError(mailError)) {
+                res.json({
+                    success: true,
+                    message: "Email delivery is in testing mode. Use the temporary OTP shown below.",
+                    developmentOtp: otp,
+                    deliveryMode: "fallback",
+                });
+                return;
+            }
+            throw mailError;
+        }
     }
     catch (error) {
         console.error("Registration OTP error:", error);
@@ -421,6 +505,20 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
     }
     try {
         const db = await loadDb();
+        const adminCredentials = getAdminCredentials();
+        if (adminCredentials &&
+            email === adminCredentials.email &&
+            parsed.data.password === adminCredentials.password) {
+            const { user, changed } = await ensureAdminUser(db, adminCredentials.email, adminCredentials.password);
+            if (changed) {
+                await saveDb(db);
+            }
+            res.json({
+                token: signToken(user, parsed.data.rememberMe),
+                user: userResponse(user),
+            });
+            return;
+        }
         const user = db.users.find((entry) => normalizeEmail(entry.email) === email);
         if (!user || !(await comparePassword(parsed.data.password, user.passwordHash))) {
             res.status(401).json({ error: "Invalid credentials" });

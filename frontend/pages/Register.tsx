@@ -35,6 +35,8 @@ const Register = () => {
   const [otpCode, setOtpCode] = useState('');
   const [otpSent, setOtpSent] = useState(false);
   const [otpVerified, setOtpVerified] = useState(false);
+  const [developmentOtp, setDevelopmentOtp] = useState('');
+  const [otpDeliveryMode, setOtpDeliveryMode] = useState<'email' | 'fallback' | null>(null);
   const [formData, setFormData] = useState({
     firstName: '',
     lastName: '',
@@ -113,6 +115,8 @@ const Register = () => {
       setOtpSent(false);
       setOtpVerified(false);
       setOtpCode('');
+      setDevelopmentOtp('');
+      setOtpDeliveryMode(null);
     }
     setFormData(prev => ({ ...prev, [field]: value }));
   };
@@ -130,7 +134,12 @@ const Register = () => {
     setSendingOtp(false);
     if (result.error) {
       setOtpVerified(false);
+      setDevelopmentOtp('');
+      setOtpDeliveryMode(null);
+      return;
     }
+    setDevelopmentOtp(result.developmentOtp || '');
+    setOtpDeliveryMode(result.deliveryMode || 'email');
   };
 
   const handleVerifyOtp = async () => {
@@ -259,6 +268,15 @@ const Register = () => {
                   <p className={`mt-2 text-sm ${otpVerified ? 'text-green-600' : 'text-slate-600'}`}>
                     {otpVerified ? 'Email verified successfully.' : 'Check your inbox and enter the 6-digit OTP.'}
                   </p>
+                  {otpDeliveryMode === 'fallback' && developmentOtp && !otpVerified && (
+                    <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                      <p className="font-medium">Temporary testing mode</p>
+                      <p className="mt-1">Mail delivery is blocked by the current Mailtrap test domain, so use this temporary OTP:</p>
+                      <div className="mt-2 rounded-md bg-white px-3 py-2 text-base font-bold tracking-[0.35em] text-amber-700">
+                        {developmentOtp}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

@@ -95,3 +95,8 @@ export const sendRegistrationOtp = async (email, otp) => {
         new Promise((_, reject) => setTimeout(() => reject(new Error("Email delivery timed out. Check SMTP settings and sender domain.")), 20000)),
     ]);
 };
+export const isMailtrapDemoRestrictionError = (error) => {
+    const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+    return (message.includes("Demo domains can only be used to send emails to account owners") ||
+        message.includes("You can only send testing emails to your own email address"));
+};

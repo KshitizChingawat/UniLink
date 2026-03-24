@@ -9,6 +9,7 @@ interface User {
   email: string;
   firstName?: string;
   lastName?: string;
+  role?: "user" | "admin";
   plan?: "free" | "pro";
   subscriptionStartedAt?: string;
   subscriptionExpiresAt?: string;
@@ -19,7 +20,7 @@ interface AuthContextValue {
   loading: boolean;
   signIn: (email: string, password: string, rememberMe?: boolean) => Promise<{ error: Error | null; shouldRedirect?: boolean }>;
   signUp: (email: string, password: string, firstName: string, lastName: string) => Promise<{ error: Error | null }>;
-  requestRegistrationOtp: (email: string) => Promise<{ error: Error | null }>;
+  requestRegistrationOtp: (email: string) => Promise<{ error: Error | null; developmentOtp?: string | null; deliveryMode?: "email" | "fallback" | null }>;
   verifyRegistrationOtp: (email: string, otp: string) => Promise<{ error: Error | null }>;
   signInWithGoogle: (email: string, rememberMe?: boolean) => Promise<{ error: Error | null }>;
   signOut: () => Promise<{ success?: boolean; error?: Error }>;
@@ -275,12 +276,16 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
 
     try {
-      const data = await fetchWithTimeout<{ message: string }>("/api/auth/request-registration-otp", {
+      const data = await fetchWithTimeout<{ message: string; developmentOtp?: string; deliveryMode?: "email" | "fallback" }>("/api/auth/request-registration-otp", {
         method: "POST",
         body: JSON.stringify({ email: normalizedEmail }),
       });
       toast.success(data.message);
-      return { error: null };
+      return {
+        error: null,
+        developmentOtp: data.developmentOtp || null,
+        deliveryMode: data.deliveryMode || "email",
+      };
     } catch (err) {
       const error =
         err instanceof DOMException && err.name === "AbortError"
@@ -289,7 +294,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
             ? err
             : new Error("Failed to send verification code");
       toast.error(error.message || "Failed to send verification code");
-      return { error };
+      return { error, developmentOtp: null, deliveryMode: null };
     }
   };
 

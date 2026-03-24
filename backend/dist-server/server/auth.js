@@ -13,6 +13,7 @@ export const sanitizeUser = (user) => ({
     email: user.email,
     firstName: user.firstName,
     lastName: user.lastName,
+    role: user.role || "user",
     plan: user.plan,
     subscriptionStartedAt: user.subscriptionStartedAt,
     subscriptionExpiresAt: user.subscriptionExpiresAt,
