@@ -1,4 +1,5 @@
 export const API_BASE_URL = "https://unilink-backend-8tyj.onrender.com";
+export const BASE_URL = API_BASE_URL;
 export class ApiError extends Error {
   status: number;
 
