@@ -114,17 +114,18 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   const signIn = async (email: string, password: string, rememberMe: boolean = false) => {
+    const normalizedEmail = email.trim().toLowerCase();
     try {
       const data = await apiFetch<{ token: string; user: User }>("/api/auth/login", {
         method: "POST",
-        body: JSON.stringify({ email, password, rememberMe }),
+        body: JSON.stringify({ email: normalizedEmail, password, rememberMe }),
       });
 
       localStorage.setItem("auth_token", data.token);
       localStorage.setItem("user_data", JSON.stringify(data.user));
-      persistRememberedEmail(email, rememberMe);
+      persistRememberedEmail(normalizedEmail, rememberMe);
       if (rememberMe) {
-        persistRememberedAccount(email, password);
+        persistRememberedAccount(normalizedEmail, password);
       }
 
       setUser(data.user);
@@ -163,10 +164,16 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   const signUp = async (email: string, password: string, firstName: string, lastName: string) => {
+    const normalizedEmail = email.trim().toLowerCase();
     try {
       const data = await apiFetch<{ token?: string; user?: User; error?: string; duplicateEmail?: boolean }>("/api/auth/register", {
         method: "POST",
-        body: JSON.stringify({ email, password, firstName, lastName }),
+        body: JSON.stringify({
+          email: normalizedEmail,
+          password,
+          firstName: firstName.trim(),
+          lastName: lastName.trim(),
+        }),
       });
 
       if (data.duplicateEmail || !data.token || !data.user) {

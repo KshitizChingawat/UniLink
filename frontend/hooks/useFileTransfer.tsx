@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from './useAuth';
 import { toast } from 'sonner';
-import { apiFetch, ApiError, BASE_URL } from '@/lib/api';
+import { apiFetch, ApiError, getApiUrl } from '@/lib/api';
 
 let cachedTransfers: FileTransfer[] = [];
 let cachedTransfersUserId: string | null = null;
@@ -74,6 +74,37 @@ export const useFileTransfer = () => {
     }
   };
 
+  const ensureCurrentDeviceId = async () => {
+    const existingDeviceId = getCurrentDeviceId();
+    if (existingDeviceId) {
+      return existingDeviceId;
+    }
+
+    const browserDeviceId =
+      localStorage.getItem('unilink_device_id') ||
+      `browser_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    localStorage.setItem('unilink_device_id', browserDeviceId);
+
+    const registeredDevice = await apiFetch<{
+      id: string;
+      deviceId: string;
+      deviceName: string;
+      deviceType: 'desktop' | 'mobile' | 'tablet' | 'browser';
+      platform: 'windows' | 'macos' | 'linux' | 'android' | 'ios' | 'browser';
+    }>('/api/devices', {
+      method: 'POST',
+      body: JSON.stringify({
+        deviceName: `${navigator.platform} Browser`,
+        deviceType: 'browser',
+        platform: 'browser',
+        deviceId: browserDeviceId,
+      }),
+    });
+
+    localStorage.setItem('unilink_current_device', JSON.stringify(registeredDevice));
+    return registeredDevice.id;
+  };
+
   // Fetch file transfers
   const fetchTransfers = async () => {
     if (!user) return;
@@ -110,6 +141,7 @@ export const useFileTransfer = () => {
     if (!token) return;
 
     try {
+      const currentDeviceId = await ensureCurrentDeviceId();
       setLoading(true);
       setUploadProgress((current) => ({
         ...current,
@@ -118,7 +150,7 @@ export const useFileTransfer = () => {
 
       const data = await new Promise<FileTransfer>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open('POST', `${BASE_URL}/api/file-transfers/upload`);
+        xhr.open('POST', getApiUrl('/api/file-transfers/upload'));
         xhr.responseType = 'json';
         xhr.setRequestHeader('Authorization', `Bearer ${token}`);
         xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
@@ -167,7 +199,7 @@ export const useFileTransfer = () => {
         };
 
         xhr.onerror = () => {
-          reject(new Error('Upload failed'));
+          reject(new Error('Upload failed. Check your connection or deployment API settings.'));
         };
 
         xhr.onabort = () => {
@@ -225,7 +257,7 @@ export const useFileTransfer = () => {
     if (!token) return;
 
     try {
-      const response = await fetch(`${BASE_URL}/api/file-transfers/${transferId}/download`, {
+      const response = await fetch(getApiUrl(`/api/file-transfers/${transferId}/download`), {
         headers: {
           'Authorization': `Bearer ${token}`
         }

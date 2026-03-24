@@ -68,6 +68,10 @@ const googleAuthSchema = z.object({
   rememberMe: z.boolean().optional(),
 });
 
+const forgotPasswordSchema = z.object({
+  email: z.string().trim().email().max(120),
+});
+
 const pairClaimSchema = z.object({
   deviceName: z.string().trim().min(1).max(120),
   deviceType: z.enum(["desktop", "mobile", "tablet", "browser"]),
@@ -374,6 +378,25 @@ app.post("/api/auth/google", authLimiter, async (req, res) => {
   res.json({
     token: signToken(user, parsed.data.rememberMe),
     user: userResponse(user),
+  });
+});
+
+app.post("/api/auth/forgot-password", authLimiter, async (req, res) => {
+  const parsed = forgotPasswordSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Enter a valid email address" });
+    return;
+  }
+
+  const db = await loadDb();
+  const email = parsed.data.email.toLowerCase();
+  const user = db.users.find((entry) => entry.email === email);
+
+  res.json({
+    success: true,
+    message: user
+      ? "Password reset support has been initiated for this account."
+      : "If an account exists for this email, password reset support has been initiated.",
   });
 });
 

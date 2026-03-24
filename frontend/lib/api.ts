@@ -1,5 +1,4 @@
-export const BASE_URL = "https://unilink-backend-8tyj.onrender.com";
-
+export const API_BASE_URL = "https://unilink-backend-8tyj.onrender.com";
 export class ApiError extends Error {
   status: number;
 
@@ -24,7 +23,7 @@ export const apiFetch = async <T>(input: string, init: RequestInit = {}): Promis
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(`${BASE_URL}${input}`, {
+  const response = await fetch(`${API_BASE_URL}${input}`, {
     ...init,
     headers,
   });
@@ -42,6 +41,8 @@ export const apiFetch = async <T>(input: string, init: RequestInit = {}): Promis
 
   return payload as T;
 };
+
+export const getApiUrl = (input: string) => `${API_BASE_URL}${input}`;
 
 export const fileToBase64 = (file: File) =>
   new Promise<string>((resolve, reject) => {

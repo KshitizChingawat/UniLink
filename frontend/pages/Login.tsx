@@ -10,6 +10,8 @@ import { useAuth } from '@/hooks/useAuth';
 import Logo from '@/components/Logo';
 import AnimatedToggle from '@/components/ui/animated-toggle';
 import { toast } from 'sonner';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { apiFetch } from '@/lib/api';
 
 const Login = () => {
   const rememberedAccounts = JSON.parse(localStorage.getItem('saved_login_accounts') || '[]') as Array<{
@@ -22,6 +24,9 @@ const Login = () => {
   const [password, setPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [forgotOpen, setForgotOpen] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotLoading, setForgotLoading] = useState(false);
   const { signIn, signInWithGoogle } = useAuth();
 
   const hydrateRememberedAccount = (selectedEmail: string) => {
@@ -66,6 +71,27 @@ const Login = () => {
     setLoading(true);
     await signInWithGoogle(googleEmail, true);
     setLoading(false);
+  };
+
+  const handleForgotPassword = async () => {
+    if (!forgotEmail.trim()) {
+      toast.error('Enter your email address first.');
+      return;
+    }
+
+    setForgotLoading(true);
+    try {
+      const data = await apiFetch<{ message: string }>('/api/auth/forgot-password', {
+        method: 'POST',
+        body: JSON.stringify({ email: forgotEmail }),
+      });
+      toast.success(data.message);
+      setForgotOpen(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to start password reset support.');
+    } finally {
+      setForgotLoading(false);
+    }
   };
 
   return (
@@ -155,7 +181,16 @@ const Login = () => {
                   Remember me
                 </Label>
               </div>
-              <span className="text-sm text-blue-100/0 text-unilink-600">Secure access</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setForgotEmail(email);
+                  setForgotOpen(true);
+                }}
+                className="text-sm font-medium text-unilink-600 transition-colors hover:text-unilink-700"
+              >
+                Forgot password?
+              </button>
             </div>
 
             <div className="rounded-2xl border border-blue-100 bg-blue-50/40 px-4 py-5">
@@ -210,6 +245,35 @@ const Login = () => {
           </div>
         </div>
       </div>
+
+      <Dialog open={forgotOpen} onOpenChange={setForgotOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Reset password support</DialogTitle>
+            <DialogDescription>
+              Enter your account email and we&apos;ll start the password reset support flow for UniLink.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="forgot-email">Email address</Label>
+            <Input
+              id="forgot-email"
+              type="email"
+              value={forgotEmail}
+              onChange={(e) => setForgotEmail(e.target.value)}
+              placeholder="Enter your email"
+            />
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setForgotOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="button" onClick={handleForgotPassword} disabled={forgotLoading}>
+              {forgotLoading ? 'Sending...' : 'Continue'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

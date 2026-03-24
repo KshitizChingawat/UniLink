@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Eye, EyeOff, ArrowLeft, Check } from 'lucide-react';
+import { Eye, EyeOff, Check } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import Logo from '@/components/Logo';
 import { toast } from 'sonner';
@@ -90,23 +90,23 @@ const Register = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-unilink-600 via-blue-600 to-purple-600 flex items-center justify-center p-4">
+    <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-unilink-600 via-blue-600 to-purple-600 dark:from-slate-950 dark:via-slate-900 dark:to-slate-800 flex items-center justify-center p-4">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className="absolute left-[8%] top-[12%] h-40 w-40 rounded-full bg-white/10 blur-2xl animate-float" />
+        <div className="absolute right-[10%] top-[20%] h-56 w-56 rounded-full bg-cyan-300/20 blur-3xl animate-pulse-glow" />
+        <div className="absolute bottom-[12%] left-[16%] h-48 w-48 rounded-full bg-indigo-200/20 blur-3xl animate-float" style={{ animationDelay: '1.4s' }} />
+        <div className="absolute bottom-[8%] right-[14%] h-44 w-44 rounded-full bg-white/10 blur-2xl animate-pulse-glow" style={{ animationDelay: '2.1s' }} />
+      </div>
       <div className="w-full max-w-md">
-        {/* Back to home */}
-        <Link to="/" className="inline-flex items-center text-white hover:text-blue-200 mb-8 transition-colors">
-          <ArrowLeft className="w-4 h-4 mr-2" />
-          Back to home
-        </Link>
-
         {/* Register Card */}
-        <div className="bg-white rounded-2xl shadow-2xl p-8">
+        <div className="relative bg-white/95 dark:bg-slate-900/95 backdrop-blur-sm rounded-2xl shadow-2xl p-8 border border-white/40 dark:border-slate-700">
           {/* Logo */}
           <div className="text-center mb-8">
             <div className="flex justify-center mb-4">
               <Logo size="lg" showText={false} />
             </div>
-            <h1 className="text-2xl font-bold text-gray-900">Create your account</h1>
-            <p className="text-gray-600 mt-2">Join thousands of users connecting their devices without range restrictions</p>
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Create your account</h1>
+            <p className="text-gray-600 dark:text-slate-300 mt-2">Join thousands of users connecting their devices without range restrictions</p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-6">
@@ -170,7 +170,7 @@ const Register = () => {
                   {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
-              <div className="mt-3 space-y-2 rounded-lg bg-slate-50 p-3">
+              <div className="mt-3 space-y-2 rounded-lg bg-slate-50 p-3 dark:bg-slate-800/70">
                 {passwordRules.map((rule) => (
                   <div key={rule.label} className="flex items-center gap-2 text-sm">
                     <span className={`h-2.5 w-2.5 rounded-full ${rule.valid ? 'bg-green-500' : 'bg-red-500'}`}></span>
@@ -203,8 +203,8 @@ const Register = () => {
             </div>
 
             {/* UniLink Features */}
-            <div className="bg-gray-50 rounded-lg p-4">
-              <p className="text-sm font-medium text-gray-700 mb-2">UniLink Features:</p>
+            <div className="bg-gray-50 rounded-lg p-4 dark:bg-slate-800/70">
+              <p className="text-sm font-medium text-gray-700 dark:text-slate-200 mb-2">UniLink Features:</p>
               <div className="space-y-1">
                 {[
                   'Connect devices without range restrictions',
@@ -214,7 +214,7 @@ const Register = () => {
                 ].map((feature, index) => (
                   <div key={index} className="flex items-center text-sm">
                     <Check className="w-3 h-3 text-green-500 mr-2" />
-                    <span className="text-gray-600">{feature}</span>
+                    <span className="text-gray-600 dark:text-slate-300">{feature}</span>
                   </div>
                 ))}
               </div>
@@ -227,7 +227,7 @@ const Register = () => {
                 onCheckedChange={(checked) => setAgreedToTerms(checked as boolean)}
                 className="mt-1"
               />
-              <Label htmlFor="terms" className="text-sm text-gray-600">
+              <Label htmlFor="terms" className="text-sm text-gray-600 dark:text-slate-300">
                 I agree to the{' '}
                 <Link to="/terms" className="text-unilink-600 hover:text-unilink-700">
                   Terms of Service
@@ -264,7 +264,7 @@ const Register = () => {
                 <div className="w-full border-t border-gray-300" />
               </div>
               <div className="relative flex justify-center text-sm">
-                <span className="px-2 bg-white text-gray-500">Or sign up with</span>
+                <span className="px-2 bg-white dark:bg-slate-900 text-gray-500 dark:text-slate-300">Or sign up with</span>
               </div>
             </div>
 
