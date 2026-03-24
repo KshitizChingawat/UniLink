@@ -129,7 +129,7 @@ const Register = () => {
     const result = await requestRegistrationOtp(formData.email);
     setSendingOtp(false);
     if (result.error) {
-      setOtpSent(false);
+      setOtpVerified(false);
     }
   };
 
