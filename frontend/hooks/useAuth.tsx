@@ -11,8 +11,11 @@ interface User {
   lastName?: string;
   role?: "user" | "admin";
   plan?: "free" | "pro";
+  createdAt?: string;
   subscriptionStartedAt?: string;
   subscriptionExpiresAt?: string;
+  twoFactorEnabled?: boolean;
+  twoFactorPhone?: string;
 }
 
 interface AuthContextValue {

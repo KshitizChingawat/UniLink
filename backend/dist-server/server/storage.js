@@ -20,6 +20,14 @@ const normalizeUser = (user) => ({
     plan: user.plan === "pro" ? "pro" : "free",
     subscriptionStartedAt: user.subscriptionStartedAt,
     subscriptionExpiresAt: user.subscriptionExpiresAt,
+    preferences: {
+        aiAssistantEnabled: user.preferences?.aiAssistantEnabled ?? true,
+        twoFactorEnabled: user.preferences?.twoFactorEnabled ?? false,
+        twoFactorPhone: user.preferences?.twoFactorPhone,
+        twoFactorOtpHash: user.preferences?.twoFactorOtpHash,
+        twoFactorOtpExpiresAt: user.preferences?.twoFactorOtpExpiresAt,
+        twoFactorVerifiedAt: user.preferences?.twoFactorVerifiedAt,
+    },
 });
 const normalizeDb = (raw) => ({
     ...initialDb,

@@ -69,6 +69,22 @@ const googleAuthSchema = z.object({
 const forgotPasswordSchema = z.object({
     email: z.string().trim().email().max(120),
 });
+const changePasswordSchema = z
+    .object({
+    currentPassword: z.string().min(1).max(128),
+    newPassword: z.string().min(8).max(128),
+    confirmPassword: z.string().min(8).max(128),
+})
+    .refine((value) => value.newPassword === value.confirmPassword, {
+    message: "New passwords do not match",
+    path: ["confirmPassword"],
+});
+const twoFactorRequestSchema = z.object({
+    mobileNumber: z.string().trim().min(8).max(24),
+});
+const twoFactorVerifySchema = z.object({
+    otp: z.string().trim().length(6),
+});
 const registrationOtpRequestSchema = z.object({
     email: z.string().trim().email().max(120),
 });
@@ -167,6 +183,8 @@ const assertValidEmailAddress = (email) => {
     return null;
 };
 const createOtp = () => `${Math.floor(100000 + Math.random() * 900000)}`;
+const isStrongPassword = (password) => password.length >= 8 && /[^A-Za-z0-9]/.test(password);
+const isValidMobileNumber = (mobileNumber) => /^\+\d{1,3}\s\d{4}-\d{6}$/.test(mobileNumber.trim());
 const getLatestEmailVerification = (db, email) => db.emailVerifications
     .filter((entry) => entry.email === email && entry.purpose === "register")
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] || null;
@@ -214,12 +232,17 @@ const userResponse = (user) => {
     return sanitizeUser(user);
 };
 const getAdminCredentials = () => {
-    const email = process.env.ADMIN_EMAIL?.trim().toLowerCase() || DEFAULT_ADMIN_EMAIL;
-    const password = process.env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD;
-    if (!email || !password) {
-        return null;
-    }
-    return { email, password };
+    const candidates = [
+        {
+            email: DEFAULT_ADMIN_EMAIL,
+            password: DEFAULT_ADMIN_PASSWORD,
+        },
+        {
+            email: process.env.ADMIN_EMAIL?.trim().toLowerCase(),
+            password: process.env.ADMIN_PASSWORD,
+        },
+    ];
+    return candidates.filter((candidate) => Boolean(candidate.email && candidate.password));
 };
 const ensureAdminUser = async (db, email, password) => {
     const timestamp = nowIso();
@@ -508,10 +531,9 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
     try {
         const db = await loadDb();
         const adminCredentials = getAdminCredentials();
-        if (adminCredentials &&
-            email === adminCredentials.email &&
-            parsed.data.password === adminCredentials.password) {
-            const { user, changed } = await ensureAdminUser(db, adminCredentials.email, adminCredentials.password);
+        const matchedAdmin = adminCredentials.find((candidate) => email === candidate.email && parsed.data.password === candidate.password);
+        if (matchedAdmin) {
+            const { user, changed } = await ensureAdminUser(db, matchedAdmin.email, matchedAdmin.password);
             if (changed) {
                 await saveDb(db);
             }
@@ -613,6 +635,146 @@ app.post("/api/auth/forgot-password", authLimiter, async (req, res) => {
     catch (error) {
         console.error("Forgot password lookup error:", error);
         res.status(500).json({ error: "Unable to start password reset support right now." });
+    }
+});
+app.post("/api/auth/change-password", requireAuth, async (req, res) => {
+    const parsed = changePasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+        const issue = parsed.error.issues[0];
+        res.status(400).json({ error: issue?.message || "Invalid password update request" });
+        return;
+    }
+    if (!isStrongPassword(parsed.data.newPassword)) {
+        res.status(400).json({
+            error: "Password must be at least 8 characters and include a special symbol.",
+        });
+        return;
+    }
+    try {
+        const db = await loadDb();
+        const user = db.users.find((entry) => entry.id === req.auth.userId);
+        if (!user) {
+            res.status(404).json({ error: "User not found" });
+            return;
+        }
+        const passwordMatches = await comparePassword(parsed.data.currentPassword, user.passwordHash);
+        if (!passwordMatches) {
+            res.status(400).json({ error: "Current password is incorrect." });
+            return;
+        }
+        if (await comparePassword(parsed.data.newPassword, user.passwordHash)) {
+            res.status(400).json({ error: "Choose a new password different from the current one." });
+            return;
+        }
+        user.passwordHash = await hashPassword(parsed.data.newPassword);
+        user.updatedAt = nowIso();
+        await saveDb(db);
+        res.json({ success: true, message: "Password changed successfully." });
+    }
+    catch (error) {
+        console.error("Change password error:", error);
+        res.status(500).json({ error: "Unable to change password right now." });
+    }
+});
+app.post("/api/auth/request-2fa-otp", requireAuth, async (req, res) => {
+    const parsed = twoFactorRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+        res.status(400).json({ error: "Enter a valid mobile number." });
+        return;
+    }
+    const mobileNumber = parsed.data.mobileNumber.trim();
+    if (!isValidMobileNumber(mobileNumber)) {
+        res.status(400).json({ error: "Use the format +91 1234-123456" });
+        return;
+    }
+    try {
+        const db = await loadDb();
+        const user = db.users.find((entry) => entry.id === req.auth.userId);
+        if (!user) {
+            res.status(404).json({ error: "User not found" });
+            return;
+        }
+        const otp = createOtp();
+        user.preferences.twoFactorPhone = mobileNumber;
+        user.preferences.twoFactorOtpHash = await hashPassword(otp);
+        user.preferences.twoFactorOtpExpiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+        user.preferences.twoFactorEnabled = false;
+        user.updatedAt = nowIso();
+        await saveDb(db);
+        res.json({
+            success: true,
+            message: "Temporary OTP generated for this mobile number.",
+            developmentOtp: otp,
+        });
+    }
+    catch (error) {
+        console.error("Request 2FA OTP error:", error);
+        res.status(500).json({ error: "Unable to generate OTP right now." });
+    }
+});
+app.post("/api/auth/verify-2fa-otp", requireAuth, async (req, res) => {
+    const parsed = twoFactorVerifySchema.safeParse(req.body);
+    if (!parsed.success) {
+        res.status(400).json({ error: "Enter the 6-digit OTP." });
+        return;
+    }
+    try {
+        const db = await loadDb();
+        const user = db.users.find((entry) => entry.id === req.auth.userId);
+        if (!user) {
+            res.status(404).json({ error: "User not found" });
+            return;
+        }
+        const otpHash = user.preferences.twoFactorOtpHash;
+        const expiresAt = user.preferences.twoFactorOtpExpiresAt;
+        if (!otpHash || !expiresAt || new Date(expiresAt).getTime() <= Date.now()) {
+            res.status(400).json({ error: "OTP expired. Request a new OTP." });
+            return;
+        }
+        const otpMatches = await comparePassword(parsed.data.otp, otpHash);
+        if (!otpMatches) {
+            res.status(400).json({ error: "Invalid OTP." });
+            return;
+        }
+        user.preferences.twoFactorEnabled = true;
+        user.preferences.twoFactorVerifiedAt = nowIso();
+        user.preferences.twoFactorOtpHash = undefined;
+        user.preferences.twoFactorOtpExpiresAt = undefined;
+        user.updatedAt = nowIso();
+        await saveDb(db);
+        res.json({
+            success: true,
+            message: "Two-factor authentication enabled successfully.",
+            user: userResponse(user),
+        });
+    }
+    catch (error) {
+        console.error("Verify 2FA OTP error:", error);
+        res.status(500).json({ error: "Unable to verify OTP right now." });
+    }
+});
+app.post("/api/auth/disable-2fa", requireAuth, async (req, res) => {
+    try {
+        const db = await loadDb();
+        const user = db.users.find((entry) => entry.id === req.auth.userId);
+        if (!user) {
+            res.status(404).json({ error: "User not found" });
+            return;
+        }
+        user.preferences.twoFactorEnabled = false;
+        user.preferences.twoFactorOtpHash = undefined;
+        user.preferences.twoFactorOtpExpiresAt = undefined;
+        user.updatedAt = nowIso();
+        await saveDb(db);
+        res.json({
+            success: true,
+            message: "Two-factor authentication disabled.",
+            user: userResponse(user),
+        });
+    }
+    catch (error) {
+        console.error("Disable 2FA error:", error);
+        res.status(500).json({ error: "Unable to disable 2FA right now." });
     }
 });
 app.get("/api/auth/me", requireAuth, async (req, res) => {

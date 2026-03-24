@@ -12,6 +12,11 @@ export interface UserRecord {
   subscriptionExpiresAt?: string;
   preferences: {
     aiAssistantEnabled: boolean;
+    twoFactorEnabled?: boolean;
+    twoFactorPhone?: string;
+    twoFactorOtpHash?: string;
+    twoFactorOtpExpiresAt?: string;
+    twoFactorVerifiedAt?: string;
   };
 }
 

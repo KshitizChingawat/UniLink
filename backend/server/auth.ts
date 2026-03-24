@@ -29,8 +29,11 @@ export const sanitizeUser = (user: UserRecord) => ({
   lastName: user.lastName,
   role: user.role || "user",
   plan: user.plan,
+  createdAt: user.createdAt,
   subscriptionStartedAt: user.subscriptionStartedAt,
   subscriptionExpiresAt: user.subscriptionExpiresAt,
+  twoFactorEnabled: Boolean(user.preferences.twoFactorEnabled),
+  twoFactorPhone: user.preferences.twoFactorPhone,
 });
 
 export const requireAuth = (

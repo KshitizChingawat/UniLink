@@ -7,21 +7,36 @@ import { Switch } from '@/components/ui/switch';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Shield, Lock, Key, AlertTriangle, CheckCircle, Wifi, Smartphone } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 import { useDevices } from '@/hooks/useDevices';
 import { toast } from 'sonner';
+import { apiFetch } from '@/lib/api';
 
 const SecurityPage = () => {
   const { user } = useAuth();
   const { devices, removeDevice, updateDeviceStatus } = useDevices();
   const [encryptionEnabled, setEncryptionEnabled] = useState(true);
-  const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
+  const [twoFactorEnabled, setTwoFactorEnabled] = useState(Boolean(user?.twoFactorEnabled));
   const [autoLockEnabled, setAutoLockEnabled] = useState(true);
   const [secureTransferEnabled, setSecureTransferEnabled] = useState(true);
-  const [mobileNumber, setMobileNumber] = useState('');
-  const [sentOtp, setSentOtp] = useState('');
+  const [mobileNumber, setMobileNumber] = useState(user?.twoFactorPhone || '');
   const [enteredOtp, setEnteredOtp] = useState('');
+  const [generatedOtp, setGeneratedOtp] = useState('');
+  const [sendingOtp, setSendingOtp] = useState(false);
+  const [verifyingOtp, setVerifyingOtp] = useState(false);
+  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [passwordForm, setPasswordForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: '',
+  });
+
+  useEffect(() => {
+    setTwoFactorEnabled(Boolean(user?.twoFactorEnabled));
+    setMobileNumber(user?.twoFactorPhone || '');
+  }, [user?.twoFactorEnabled, user?.twoFactorPhone]);
 
   const securityScore = () => {
     let score = 0;
@@ -44,35 +59,93 @@ const SecurityPage = () => {
     return 'Needs Improvement';
   };
 
-  const handleTwoFactorToggle = (enabled: boolean) => {
+  const handleTwoFactorToggle = async (enabled: boolean) => {
     if (!enabled) {
-      setTwoFactorEnabled(false);
-      toast.info('Two-factor authentication disabled.');
+      try {
+        const data = await apiFetch<{ message: string }>('/api/auth/disable-2fa', {
+          method: 'POST',
+        });
+        setTwoFactorEnabled(false);
+        setEnteredOtp('');
+        setGeneratedOtp('');
+        toast.success(data.message);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Unable to disable two-factor authentication.');
+      }
       return;
     }
 
     setTwoFactorEnabled(false);
   };
 
-  const sendOtp = () => {
+  const sendOtp = async () => {
     if (!mobileNumber.trim()) {
       toast.error('Enter a mobile number first.');
       return;
     }
 
-    const otp = String(Math.floor(100000 + Math.random() * 900000));
-    setSentOtp(otp);
-    toast.success(`OTP sent to ${mobileNumber}. Demo OTP: ${otp}`);
+    setSendingOtp(true);
+    try {
+      const data = await apiFetch<{ message: string; developmentOtp?: string }>('/api/auth/request-2fa-otp', {
+        method: 'POST',
+        body: JSON.stringify({ mobileNumber }),
+      });
+      setGeneratedOtp(data.developmentOtp || '');
+      toast.success(data.message);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Unable to send OTP.');
+    } finally {
+      setSendingOtp(false);
+    }
   };
 
-  const verifyOtp = () => {
-    if (enteredOtp === sentOtp && sentOtp) {
-      setTwoFactorEnabled(true);
-      toast.success('Two-factor authentication enabled successfully.');
+  const verifyOtp = async () => {
+    if (enteredOtp.trim().length !== 6) {
+      toast.error('Enter the 6-digit OTP.');
       return;
     }
 
-    toast.error('Invalid OTP. Please try again.');
+    setVerifyingOtp(true);
+    try {
+      const data = await apiFetch<{ message: string }>('/api/auth/verify-2fa-otp', {
+        method: 'POST',
+        body: JSON.stringify({ otp: enteredOtp.trim() }),
+      });
+      setTwoFactorEnabled(true);
+      setGeneratedOtp('');
+      setEnteredOtp('');
+      toast.success(data.message);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Invalid OTP. Please try again.');
+    } finally {
+      setVerifyingOtp(false);
+    }
+  };
+
+  const handlePasswordChange = async () => {
+    if (!passwordForm.currentPassword || !passwordForm.newPassword || !passwordForm.confirmPassword) {
+      toast.error('Fill in all password fields.');
+      return;
+    }
+
+    setChangingPassword(true);
+    try {
+      const data = await apiFetch<{ message: string }>('/api/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify(passwordForm),
+      });
+      toast.success(data.message);
+      setPasswordForm({
+        currentPassword: '',
+        newPassword: '',
+        confirmPassword: '',
+      });
+      setPasswordDialogOpen(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Unable to change password.');
+    } finally {
+      setChangingPassword(false);
+    }
   };
 
   return (
@@ -199,24 +272,33 @@ const SecurityPage = () => {
                     <div className="space-y-2">
                       <label className="text-sm font-medium">Mobile Number</label>
                       <Input
-                        placeholder="+94 77 123 4567"
+                        placeholder="+91 1234-123456"
                         value={mobileNumber}
                         onChange={(e) => setMobileNumber(e.target.value)}
                       />
                     </div>
                     <div className="flex gap-2">
-                      <Button type="button" variant="outline" onClick={sendOtp}>
-                        Send OTP
+                      <Button type="button" variant="outline" onClick={sendOtp} disabled={sendingOtp}>
+                        {sendingOtp ? 'Sending OTP...' : 'Send OTP'}
                       </Button>
                       <Input
                         placeholder="Enter OTP"
                         value={enteredOtp}
                         onChange={(e) => setEnteredOtp(e.target.value)}
                       />
-                      <Button type="button" onClick={verifyOtp}>
-                        Verify
+                      <Button type="button" onClick={verifyOtp} disabled={verifyingOtp || enteredOtp.trim().length !== 6}>
+                        {verifyingOtp ? 'Verifying...' : 'Verify'}
                       </Button>
                     </div>
+                    {generatedOtp && (
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                        <p className="font-medium">Temporary OTP</p>
+                        <p className="mt-1">Use this code while SMS integration is not connected yet:</p>
+                        <div className="mt-2 rounded-md bg-white px-3 py-2 text-base font-bold tracking-[0.35em] text-amber-700">
+                          {generatedOtp}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -229,14 +311,49 @@ const SecurityPage = () => {
                     </div>
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Account Created:</span>
-                      <span>{user?.created_at ? new Date(user.created_at).toLocaleDateString() : 'N/A'}</span>
+                      <span>{user?.createdAt ? new Date(user.createdAt).toLocaleDateString() : 'N/A'}</span>
                     </div>
                   </div>
                 </div>
 
-                <Button className="w-full" variant="outline">
-                  Change Password
-                </Button>
+                <Dialog open={passwordDialogOpen} onOpenChange={setPasswordDialogOpen}>
+                  <DialogTrigger asChild>
+                    <Button className="w-full" variant="outline">
+                      Change Password
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent>
+                    <DialogHeader>
+                      <DialogTitle>Change Password</DialogTitle>
+                      <DialogDescription>
+                        Update your account password. Use at least 8 characters and include a special symbol.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4">
+                      <Input
+                        type="password"
+                        placeholder="Current password"
+                        value={passwordForm.currentPassword}
+                        onChange={(e) => setPasswordForm((prev) => ({ ...prev, currentPassword: e.target.value }))}
+                      />
+                      <Input
+                        type="password"
+                        placeholder="New password"
+                        value={passwordForm.newPassword}
+                        onChange={(e) => setPasswordForm((prev) => ({ ...prev, newPassword: e.target.value }))}
+                      />
+                      <Input
+                        type="password"
+                        placeholder="Confirm new password"
+                        value={passwordForm.confirmPassword}
+                        onChange={(e) => setPasswordForm((prev) => ({ ...prev, confirmPassword: e.target.value }))}
+                      />
+                      <Button type="button" className="w-full" onClick={handlePasswordChange} disabled={changingPassword}>
+                        {changingPassword ? 'Changing Password...' : 'Save New Password'}
+                      </Button>
+                    </div>
+                  </DialogContent>
+                </Dialog>
               </CardContent>
             </Card>
           </div>
