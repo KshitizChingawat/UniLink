@@ -13,6 +13,7 @@ const initialDb: AppDatabase = {
   aiSuggestions: [],
   bluetoothDevices: [],
   pairSessions: [],
+  emailVerifications: [],
 };
 
 let dbCache: AppDatabase | null = null;
@@ -37,6 +38,7 @@ const normalizeDb = (raw: Partial<AppDatabase> | null | undefined): AppDatabase 
   aiSuggestions: raw?.aiSuggestions || [],
   bluetoothDevices: raw?.bluetoothDevices || [],
   pairSessions: raw?.pairSessions || [],
+  emailVerifications: raw?.emailVerifications || [],
 });
 
 // no-op: kept so index.ts startup doesn't need to change

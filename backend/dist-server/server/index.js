@@ -6,6 +6,7 @@ import os from "node:os";
 import { Writable } from "node:stream";
 import { z } from "zod";
 import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
+import { isEmailVerificationConfigured, sendRegistrationOtp } from "./mailer.js";
 import { comparePassword, hashPassword, requireAuth, sanitizeUser, signToken } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
 import { nowIso, sanitizeFilename } from "./helpers.js";
@@ -64,6 +65,13 @@ const googleAuthSchema = z.object({
 });
 const forgotPasswordSchema = z.object({
     email: z.string().trim().email().max(120),
+});
+const registrationOtpRequestSchema = z.object({
+    email: z.string().trim().email().max(120),
+});
+const registrationOtpVerifySchema = z.object({
+    email: z.string().trim().email().max(120),
+    otp: z.string().trim().length(6),
 });
 const pairClaimSchema = z.object({
     deviceName: z.string().trim().min(1).max(120),
@@ -153,6 +161,16 @@ const assertValidEmailAddress = (email) => {
         return "Enter a valid email address";
     }
     return null;
+};
+const createOtp = () => `${Math.floor(100000 + Math.random() * 900000)}`;
+const getLatestEmailVerification = (db, email) => db.emailVerifications
+    .filter((entry) => entry.email === email && entry.purpose === "register")
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] || null;
+const isEmailVerificationValid = (verification) => Boolean(verification &&
+    verification.verifiedAt &&
+    new Date(verification.expiresAt).getTime() > Date.now());
+const consumeExpiredEmailVerifications = (db) => {
+    db.emailVerifications = db.emailVerifications.filter((entry) => new Date(entry.expiresAt).getTime() > Date.now());
 };
 const refreshUserPlan = (user) => {
     if (user.plan === "pro" && !isSubscriptionActive(user)) {
@@ -249,6 +267,92 @@ app.get("/api/health", async (_req, res) => {
         timestamp: nowIso(),
     });
 });
+app.post("/api/auth/request-registration-otp", authLimiter, async (req, res) => {
+    const parsed = registrationOtpRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+        res.status(400).json({ error: "Enter a valid email address" });
+        return;
+    }
+    const email = normalizeEmail(parsed.data.email);
+    const emailError = assertValidEmailAddress(email);
+    if (emailError) {
+        res.status(400).json({ error: emailError });
+        return;
+    }
+    if (!isEmailVerificationConfigured()) {
+        res.status(503).json({
+            error: "Email verification is not configured yet. Add SMTP settings on the server first.",
+        });
+        return;
+    }
+    try {
+        const db = await loadDb();
+        consumeExpiredEmailVerifications(db);
+        if (db.users.some((user) => normalizeEmail(user.email) === email)) {
+            res.status(409).json({ error: "Email is already registered" });
+            return;
+        }
+        const otp = createOtp();
+        const timestamp = nowIso();
+        const verification = {
+            id: createId(),
+            email,
+            purpose: "register",
+            otpHash: await hashPassword(otp),
+            createdAt: timestamp,
+            expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+        };
+        db.emailVerifications = db.emailVerifications.filter((entry) => !(entry.email === email && entry.purpose === "register"));
+        db.emailVerifications.unshift(verification);
+        await saveDb(db);
+        await sendRegistrationOtp(email, otp);
+        res.json({
+            success: true,
+            message: "Verification code sent to your email.",
+        });
+    }
+    catch (error) {
+        console.error("Registration OTP error:", error);
+        res.status(500).json({ error: "Failed to send the verification code. Please try again." });
+    }
+});
+app.post("/api/auth/verify-registration-otp", authLimiter, async (req, res) => {
+    const parsed = registrationOtpVerifySchema.safeParse(req.body);
+    if (!parsed.success) {
+        res.status(400).json({ error: "Enter the 6-digit verification code." });
+        return;
+    }
+    const email = normalizeEmail(parsed.data.email);
+    const emailError = assertValidEmailAddress(email);
+    if (emailError) {
+        res.status(400).json({ error: emailError });
+        return;
+    }
+    try {
+        const db = await loadDb();
+        consumeExpiredEmailVerifications(db);
+        const verification = getLatestEmailVerification(db, email);
+        if (!verification || new Date(verification.expiresAt).getTime() <= Date.now()) {
+            res.status(400).json({ error: "Verification code expired. Request a new code." });
+            return;
+        }
+        const otpMatches = await comparePassword(parsed.data.otp, verification.otpHash);
+        if (!otpMatches) {
+            res.status(400).json({ error: "Invalid verification code." });
+            return;
+        }
+        verification.verifiedAt = nowIso();
+        await saveDb(db);
+        res.json({
+            success: true,
+            message: "Email verified successfully.",
+        });
+    }
+    catch (error) {
+        console.error("Registration OTP verification error:", error);
+        res.status(500).json({ error: "Failed to verify the code. Please try again." });
+    }
+});
 app.post("/api/auth/register", authLimiter, async (req, res) => {
     const parsed = registerSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -263,8 +367,14 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
     }
     try {
         const db = await loadDb();
+        consumeExpiredEmailVerifications(db);
         if (db.users.some((user) => user.email === email)) {
             res.json({ error: "Email is already registered", duplicateEmail: true });
+            return;
+        }
+        const verification = getLatestEmailVerification(db, email);
+        if (!isEmailVerificationValid(verification)) {
+            res.status(400).json({ error: "Verify your email with the OTP before creating the account." });
             return;
         }
         const timestamp = nowIso();
@@ -282,6 +392,7 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
             },
         };
         db.users.push(user);
+        db.emailVerifications = db.emailVerifications.filter((entry) => !(entry.email === email && entry.purpose === "register"));
         await saveDb(db);
         res.status(201).json({
             token: signToken(user),

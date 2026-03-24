@@ -10,6 +10,7 @@ const initialDb = {
     aiSuggestions: [],
     bluetoothDevices: [],
     pairSessions: [],
+    emailVerifications: [],
 };
 let dbCache = null;
 // Write-lock: queue concurrent saveDb calls so they don't race and corrupt db.json
@@ -31,6 +32,7 @@ const normalizeDb = (raw) => ({
     aiSuggestions: raw?.aiSuggestions || [],
     bluetoothDevices: raw?.bluetoothDevices || [],
     pairSessions: raw?.pairSessions || [],
+    emailVerifications: raw?.emailVerifications || [],
 });
 // no-op: kept so index.ts startup doesn't need to change
 export const ensureDataDirs = async () => { };

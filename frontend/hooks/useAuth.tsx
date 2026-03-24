@@ -19,6 +19,8 @@ interface AuthContextValue {
   loading: boolean;
   signIn: (email: string, password: string, rememberMe?: boolean) => Promise<{ error: Error | null; shouldRedirect?: boolean }>;
   signUp: (email: string, password: string, firstName: string, lastName: string) => Promise<{ error: Error | null }>;
+  requestRegistrationOtp: (email: string) => Promise<{ error: Error | null }>;
+  verifyRegistrationOtp: (email: string, otp: string) => Promise<{ error: Error | null }>;
   signInWithGoogle: (email: string, rememberMe?: boolean) => Promise<{ error: Error | null }>;
   signOut: () => Promise<{ success?: boolean; error?: Error }>;
   updateProfile: (profile: Partial<User>) => Promise<void>;
@@ -74,6 +76,19 @@ const persistRememberedAccount = (email: string, password: string) => {
   });
 
   localStorage.setItem(rememberedAccountsKey, JSON.stringify(filtered.slice(0, 5)));
+};
+
+const clearRememberedAccount = (email: string) => {
+  const existing = JSON.parse(localStorage.getItem(rememberedAccountsKey) || "[]") as Array<{
+    email: string;
+    password: string;
+    lastUsed: string;
+  }>;
+
+  localStorage.setItem(
+    rememberedAccountsKey,
+    JSON.stringify(existing.filter((account) => account.email !== email)),
+  );
 };
 
 const isLikelyRealEmail = (email: string) => {
@@ -151,6 +166,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       persistRememberedEmail(normalizedEmail, rememberMe);
       if (rememberMe) {
         persistRememberedAccount(normalizedEmail, password);
+      } else {
+        clearRememberedAccount(normalizedEmail);
       }
 
       setUser(data.user);
@@ -224,8 +241,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
       localStorage.setItem("auth_token", data.token);
       localStorage.setItem("user_data", JSON.stringify(data.user));
-      persistRememberedEmail(normalizedEmail, true);
-      persistRememberedAccount(normalizedEmail, password);
       setUser(data.user);
       toast.success("Account created and signed in successfully!");
       setTimeout(() => navigate("/dashboard"), 100);
@@ -233,6 +248,50 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     } catch (err) {
       const error = err instanceof Error ? err : new Error("Registration failed");
       toast.error(error.message || "Sign up failed");
+      return { error };
+    }
+  };
+
+  const requestRegistrationOtp = async (email: string) => {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!isLikelyRealEmail(normalizedEmail)) {
+      const error = new Error("Enter a valid email address");
+      toast.error(error.message);
+      return { error };
+    }
+
+    try {
+      const data = await apiFetch<{ message: string }>("/api/auth/request-registration-otp", {
+        method: "POST",
+        body: JSON.stringify({ email: normalizedEmail }),
+      });
+      toast.success(data.message);
+      return { error: null };
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error("Failed to send verification code");
+      toast.error(error.message || "Failed to send verification code");
+      return { error };
+    }
+  };
+
+  const verifyRegistrationOtp = async (email: string, otp: string) => {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!isLikelyRealEmail(normalizedEmail)) {
+      const error = new Error("Enter a valid email address");
+      toast.error(error.message);
+      return { error };
+    }
+
+    try {
+      const data = await apiFetch<{ message: string }>("/api/auth/verify-registration-otp", {
+        method: "POST",
+        body: JSON.stringify({ email: normalizedEmail, otp }),
+      });
+      toast.success(data.message);
+      return { error: null };
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error("Failed to verify the code");
+      toast.error(error.message || "Failed to verify the code");
       return { error };
     }
   };
@@ -301,6 +360,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       loading,
       signIn,
       signUp,
+      requestRegistrationOtp,
+      verifyRegistrationOtp,
       signInWithGoogle,
       signOut,
       updateProfile,

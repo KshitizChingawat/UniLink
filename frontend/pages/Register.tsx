@@ -29,7 +29,12 @@ const Register = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [sendingOtp, setSendingOtp] = useState(false);
+  const [verifyingOtp, setVerifyingOtp] = useState(false);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
+  const [otpCode, setOtpCode] = useState('');
+  const [otpSent, setOtpSent] = useState(false);
+  const [otpVerified, setOtpVerified] = useState(false);
   const [formData, setFormData] = useState({
     firstName: '',
     lastName: '',
@@ -37,7 +42,7 @@ const Register = () => {
     password: '',
     confirmPassword: ''
   });
-  const { signUp, signInWithGoogle } = useAuth();
+  const { signUp, signInWithGoogle, requestRegistrationOtp, verifyRegistrationOtp } = useAuth();
 
   const passwordRules = [
     {
@@ -78,6 +83,11 @@ const Register = () => {
       toast.error('Please agree to the Terms of Service and Privacy Policy');
       return;
     }
+
+    if (!otpVerified) {
+      toast.error('Verify your email with the OTP before creating the account.');
+      return;
+    }
     
     setLoading(true);
     
@@ -99,7 +109,41 @@ const Register = () => {
   };
 
   const handleInputChange = (field: string, value: string) => {
+    if (field === 'email') {
+      setOtpSent(false);
+      setOtpVerified(false);
+      setOtpCode('');
+    }
     setFormData(prev => ({ ...prev, [field]: value }));
+  };
+
+  const handleRequestOtp = async () => {
+    if (!emailLooksValid) {
+      toast.error('Enter a valid email address');
+      return;
+    }
+
+    setSendingOtp(true);
+    const result = await requestRegistrationOtp(formData.email);
+    setSendingOtp(false);
+    if (!result.error) {
+      setOtpSent(true);
+      setOtpVerified(false);
+    }
+  };
+
+  const handleVerifyOtp = async () => {
+    if (otpCode.trim().length !== 6) {
+      toast.error('Enter the 6-digit verification code.');
+      return;
+    }
+
+    setVerifyingOtp(true);
+    const result = await verifyRegistrationOtp(formData.email, otpCode.trim());
+    setVerifyingOtp(false);
+    if (!result.error) {
+      setOtpVerified(true);
+    }
   };
 
   const handleGoogleRegister = async () => {
@@ -175,6 +219,46 @@ const Register = () => {
               />
               {formData.email && !emailLooksValid && (
                 <p className="mt-2 text-sm text-red-600">Enter a valid email address</p>
+              )}
+              <div className="mt-3 flex gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="flex-1"
+                  onClick={handleRequestOtp}
+                  disabled={sendingOtp || !emailLooksValid}
+                >
+                  {sendingOtp ? 'Sending code...' : otpSent ? 'Resend OTP' : 'Send OTP'}
+                </Button>
+              </div>
+              {otpSent && (
+                <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50/70 p-3">
+                  <Label htmlFor="otpCode">Email verification code</Label>
+                  <div className="mt-2 flex gap-2">
+                    <Input
+                      id="otpCode"
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={6}
+                      value={otpCode}
+                      onChange={(e) => {
+                        setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6));
+                        setOtpVerified(false);
+                      }}
+                      placeholder="Enter 6-digit OTP"
+                    />
+                    <Button
+                      type="button"
+                      onClick={handleVerifyOtp}
+                      disabled={verifyingOtp || otpCode.trim().length !== 6}
+                    >
+                      {verifyingOtp ? 'Verifying...' : 'Verify'}
+                    </Button>
+                  </div>
+                  <p className={`mt-2 text-sm ${otpVerified ? 'text-green-600' : 'text-slate-600'}`}>
+                    {otpVerified ? 'Email verified successfully.' : 'Check your inbox and enter the 6-digit OTP.'}
+                  </p>
+                </div>
               )}
             </div>
 
@@ -270,7 +354,7 @@ const Register = () => {
             <Button 
               type="submit" 
               className="w-full bg-unilink-600 hover:bg-unilink-700"
-              disabled={loading || !agreedToTerms || !isPasswordValid}
+              disabled={loading || !agreedToTerms || !isPasswordValid || !otpVerified}
             >
               {loading ? 'Creating Account...' : 'Create Account'}
             </Button>

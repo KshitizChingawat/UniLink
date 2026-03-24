@@ -106,6 +106,16 @@ export interface PairSessionRecord {
   claimedDeviceId?: string;
 }
 
+export interface EmailVerificationRecord {
+  id: string;
+  email: string;
+  purpose: "register";
+  otpHash: string;
+  expiresAt: string;
+  createdAt: string;
+  verifiedAt?: string;
+}
+
 export interface AppDatabase {
   users: UserRecord[];
   devices: DeviceRecord[];
@@ -115,4 +125,5 @@ export interface AppDatabase {
   aiSuggestions: AiSuggestionRecord[];
   bluetoothDevices: BluetoothDeviceRecord[];
   pairSessions: PairSessionRecord[];
+  emailVerifications: EmailVerificationRecord[];
 }
