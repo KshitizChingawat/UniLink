@@ -383,7 +383,11 @@ app.post("/api/auth/request-registration-otp", authLimiter, async (req, res) => 
     });
   } catch (error) {
     console.error("Registration OTP error:", error);
-    res.status(500).json({ error: "Failed to send the verification code. Please try again." });
+    const message =
+      error instanceof Error && error.message
+        ? error.message
+        : "Failed to send the verification code. Please try again.";
+    res.status(500).json({ error: message });
   }
 });
 
