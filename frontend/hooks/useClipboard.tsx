@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from './useAuth';
 import { toast } from 'sonner';
 import { apiFetch } from '@/lib/api';
@@ -36,7 +36,7 @@ export const useClipboard = () => {
   };
 
   // Fetch clipboard history
-  const fetchClipboardHistory = async () => {
+  const fetchClipboardHistory = useCallback(async () => {
     if (!user) return;
 
     const token = localStorage.getItem('auth_token');
@@ -45,11 +45,12 @@ export const useClipboard = () => {
     try {
       const data = await apiFetch<ClipboardItem[]>('/api/clipboard');
       cachedClipboardHistory = data || [];
+      cachedClipboardUserId = user.id;
       setClipboardHistory(cachedClipboardHistory);
     } catch (err) {
       console.error('Fetch clipboard error:', err);
     }
-  };
+  }, [user]);
 
   // Sync clipboard content
   const syncClipboard = async (content: string, contentType: string = 'text') => {
@@ -61,8 +62,8 @@ export const useClipboard = () => {
 
     try {
       setLoading(true);
-      
-      await apiFetch('/api/clipboard', {
+
+      const createdItem = await apiFetch<ClipboardItem>('/api/clipboard', {
         method: 'POST',
         body: JSON.stringify({
           device_id: currentDeviceId,
@@ -71,6 +72,9 @@ export const useClipboard = () => {
         })
       });
 
+      cachedClipboardHistory = [createdItem, ...cachedClipboardHistory.filter((item) => item.id !== createdItem.id)];
+      cachedClipboardUserId = user.id;
+      setClipboardHistory(cachedClipboardHistory);
       await fetchClipboardHistory();
       toast.success('Clipboard synced successfully');
     } catch (err) {
@@ -138,7 +142,31 @@ export const useClipboard = () => {
     return () => {
       active = false;
     };
-  }, [user]);
+  }, [user, fetchClipboardHistory]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const refreshClipboard = () => {
+      fetchClipboardHistory().catch(() => undefined);
+    };
+
+    const interval = window.setInterval(refreshClipboard, 3000);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshClipboard();
+      }
+    };
+
+    window.addEventListener('focus', refreshClipboard);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', refreshClipboard);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [user, fetchClipboardHistory]);
 
   return {
     clipboardHistory,
