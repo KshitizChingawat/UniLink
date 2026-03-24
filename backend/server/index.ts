@@ -36,6 +36,8 @@ const FREE_FILE_SIZE_LIMIT = 100 * 1024 * 1024;
 const PRO_FILE_SIZE_LIMIT = 10 * 1024 * 1024 * 1024;
 const MONTH_IN_MS = 30 * 24 * 60 * 60 * 1000;
 const OTP_FALLBACK_ENABLED = process.env.ALLOW_OTP_FALLBACK !== "false";
+const DEFAULT_ADMIN_EMAIL = "en22me304055@medicaps.ac.in";
+const DEFAULT_ADMIN_PASSWORD = "unilinkproject@";
 
 app.use(
   helmet({
@@ -263,8 +265,8 @@ const userResponse = (user: UserRecord) => {
 };
 
 const getAdminCredentials = () => {
-  const email = process.env.ADMIN_EMAIL?.trim().toLowerCase();
-  const password = process.env.ADMIN_PASSWORD;
+  const email = process.env.ADMIN_EMAIL?.trim().toLowerCase() || DEFAULT_ADMIN_EMAIL;
+  const password = process.env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD;
 
   if (!email || !password) {
     return null;
