@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from './useAuth';
 import { toast } from 'sonner';
 import { apiFetch, ApiError, getApiUrl } from '@/lib/api';
 
 let cachedTransfers: FileTransfer[] = [];
 let cachedTransfersUserId: string | null = null;
+const uploadSessionStorageKey = 'unilink_upload_sessions';
 
 export interface FileTransfer {
   id: string;
@@ -26,8 +27,29 @@ export const useFileTransfer = () => {
   const [transfers, setTransfers] = useState<FileTransfer[]>(cachedTransfers);
   const [loading, setLoading] = useState(() => !cachedTransfers.length);
   const [uploadProgress, setUploadProgress] = useState<{ [key: string]: number }>({});
+  const activeUploadControllers = useRef<Record<string, Set<XMLHttpRequest>>>({});
+  const uploadSessionIds = useRef<Record<string, string>>({});
   const { user } = useAuth();
   const chunkSizeThreshold = 25 * 1024 * 1024;
+  const chunkUploadConcurrency = 4;
+  const chunkRetryLimit = 3;
+
+  const getUploadSessionMap = () => {
+    if (typeof window === 'undefined') return {} as Record<string, string>;
+    try {
+      return JSON.parse(localStorage.getItem(uploadSessionStorageKey) || '{}') as Record<string, string>;
+    } catch {
+      return {};
+    }
+  };
+
+  const setUploadSessionMap = (value: Record<string, string>) => {
+    if (typeof window === 'undefined') return;
+    localStorage.setItem(uploadSessionStorageKey, JSON.stringify(value));
+  };
+
+  const getFileFingerprint = (file: File, targetDeviceId?: string, transferMethod: 'cloud' | 'p2p' | 'local' = 'cloud') =>
+    [user?.id || 'guest', file.name, file.size, file.lastModified, file.type, targetDeviceId || 'all', transferMethod].join(':');
 
   const getCurrentDeviceId = (): string | null => {
     if (typeof window === 'undefined') return null;
@@ -106,6 +128,160 @@ export const useFileTransfer = () => {
     return registeredDevice.id;
   };
 
+  const registerActiveUpload = (uploadId: string, xhr: XMLHttpRequest) => {
+    if (!activeUploadControllers.current[uploadId]) {
+      activeUploadControllers.current[uploadId] = new Set();
+    }
+    activeUploadControllers.current[uploadId].add(xhr);
+  };
+
+  const unregisterActiveUpload = (uploadId: string, xhr?: XMLHttpRequest) => {
+    if (!activeUploadControllers.current[uploadId]) return;
+    if (xhr) {
+      activeUploadControllers.current[uploadId].delete(xhr);
+    }
+    if (!xhr || activeUploadControllers.current[uploadId].size === 0) {
+      delete activeUploadControllers.current[uploadId];
+    }
+  };
+
+  const createPendingTransfer = (
+    uploadId: string,
+    file: File,
+    senderDeviceId: string,
+    receiverDeviceId?: string,
+    transferMethod: 'cloud' | 'p2p' | 'local' = 'cloud'
+  ): FileTransfer => ({
+    id: uploadId,
+    user_id: user?.id || '',
+    sender_device_id: senderDeviceId,
+    receiver_device_id: receiverDeviceId,
+    file_name: file.name,
+    file_size: file.size,
+    file_type: file.type || 'application/octet-stream',
+    transfer_status: 'in_progress',
+    transfer_method: transferMethod,
+    created_at: new Date().toISOString(),
+  });
+
+  const updateUploadProgress = (
+    uploadId: string,
+    fileSize: number,
+    completedChunkBytes: number,
+    activeChunkProgress: Record<number, number>,
+  ) => {
+    const activeBytes = Object.values(activeChunkProgress).reduce((sum, value) => sum + value, 0);
+    const percent = Math.min(98, Math.round(((completedChunkBytes + activeBytes) / fileSize) * 100));
+    setUploadProgress((current) => ({
+      ...current,
+      [uploadId]: percent,
+    }));
+  };
+
+  const uploadLargeFileInChunks = async (
+    uploadId: string,
+    sessionUploadId: string,
+    chunkSize: number,
+    totalChunks: number,
+    file: File,
+    uploadedChunks: number[] = []
+  ) => {
+    const uploadedChunkSet = new Set(uploadedChunks);
+    let completedChunkBytes = uploadedChunks.reduce((sum, chunkIndex) => {
+      const start = chunkIndex * chunkSize;
+      const end = Math.min(file.size, start + chunkSize);
+      return sum + (end - start);
+    }, 0);
+    const activeChunkProgress: Record<number, number> = {};
+    updateUploadProgress(uploadId, file.size, completedChunkBytes, activeChunkProgress);
+
+    const missingChunkIndices = Array.from({ length: totalChunks }, (_, index) => index).filter(
+      (index) => !uploadedChunkSet.has(index),
+    );
+
+    const uploadSingleChunk = async (chunkIndex: number) => {
+      const start = chunkIndex * chunkSize;
+      const end = Math.min(file.size, start + chunkSize);
+      const chunk = file.slice(start, end);
+
+      for (let attempt = 0; attempt < chunkRetryLimit; attempt += 1) {
+        let xhr: XMLHttpRequest | null = null;
+        try {
+          await new Promise<void>((resolve, reject) => {
+            xhr = new XMLHttpRequest();
+            registerActiveUpload(uploadId, xhr);
+            xhr.open('POST', getApiUrl('/api/file-transfers/chunk'));
+            xhr.timeout = 0;
+            xhr.setRequestHeader('Authorization', `Bearer ${localStorage.getItem('auth_token')}`);
+            xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+            xhr.setRequestHeader('X-Upload-Id', sessionUploadId);
+            xhr.setRequestHeader('X-Chunk-Index', String(chunkIndex));
+            xhr.setRequestHeader('X-Total-Chunks', String(totalChunks));
+
+            xhr.upload.onprogress = (event) => {
+              if (!event.lengthComputable) return;
+              activeChunkProgress[chunkIndex] = event.loaded;
+              updateUploadProgress(uploadId, file.size, completedChunkBytes, activeChunkProgress);
+            };
+
+            xhr.onload = () => {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                completedChunkBytes += chunk.size;
+                delete activeChunkProgress[chunkIndex];
+                updateUploadProgress(uploadId, file.size, completedChunkBytes, activeChunkProgress);
+                resolve();
+                return;
+              }
+
+              let message = 'Large file chunk upload failed';
+              if (xhr.responseText) {
+                try {
+                  const payload = JSON.parse(xhr.responseText) as Record<string, unknown>;
+                  if ('error' in payload) {
+                    message = String(payload.error);
+                  }
+                } catch {
+                  message = xhr.responseText;
+                }
+              }
+
+              reject(new ApiError(message, xhr.status || 400));
+            };
+
+            xhr.onerror = () => reject(new Error('Large file upload failed. Please check your connection and try again.'));
+            xhr.onabort = () => reject(new Error('Large file upload was cancelled'));
+            xhr.send(chunk);
+          });
+          return;
+        } catch (error) {
+          const cancelled = error instanceof Error && /cancelled/i.test(error.message);
+          if (cancelled || attempt === chunkRetryLimit - 1) {
+            throw error;
+          }
+        } finally {
+          delete activeChunkProgress[chunkIndex];
+          updateUploadProgress(uploadId, file.size, completedChunkBytes, activeChunkProgress);
+          if (xhr) {
+            unregisterActiveUpload(uploadId, xhr);
+          }
+        }
+      }
+
+      throw new Error(`Failed to upload chunk ${chunkIndex + 1}.`);
+    };
+
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(chunkUploadConcurrency, missingChunkIndices.length) }, async () => {
+      while (cursor < missingChunkIndices.length) {
+        const currentIndex = cursor;
+        cursor += 1;
+        await uploadSingleChunk(missingChunkIndices[currentIndex]);
+      }
+    });
+
+    await Promise.all(workers);
+  };
+
   // Fetch file transfers
   const fetchTransfers = useCallback(async () => {
     if (!user) return;
@@ -141,80 +317,88 @@ export const useFileTransfer = () => {
 
     const token = localStorage.getItem('auth_token');
     if (!token) return;
+    const uploadId = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     try {
       const currentDeviceId = await ensureCurrentDeviceId();
+      const pendingTransfer = createPendingTransfer(uploadId, file, currentDeviceId, targetDeviceId, transferMethod);
+      cachedTransfers = [pendingTransfer, ...cachedTransfers.filter((transfer) => transfer.id !== uploadId)];
+      cachedTransfersUserId = user.id;
+      setTransfers(cachedTransfers);
       setLoading(true);
       setUploadProgress((current) => ({
         ...current,
-        [file.name]: 0,
+        [uploadId]: 0,
       }));
 
       let data: FileTransfer;
 
       if (file.size > chunkSizeThreshold) {
-        const init = await apiFetch<{
+        const fileFingerprint = getFileFingerprint(file, targetDeviceId, transferMethod);
+        const storedSessions = getUploadSessionMap();
+        let sessionUploadId = storedSessions[fileFingerprint] || '';
+        let init: {
           uploadId: string;
           chunkSize: number;
           totalChunks: number;
-        }>('/api/file-transfers/initiate', {
-          method: 'POST',
-          body: JSON.stringify({
-            fileName: file.name,
-            fileSize: file.size,
-            fileType: file.type || 'application/octet-stream',
-            senderDeviceId: currentDeviceId,
-            receiverDeviceId: targetDeviceId,
-            transferMethod,
-          }),
-        });
+          uploadedChunks?: number[];
+        };
 
-        let uploadedBytes = 0;
-        for (let chunkIndex = 0; chunkIndex < init.totalChunks; chunkIndex += 1) {
-          const start = chunkIndex * init.chunkSize;
-          const end = Math.min(file.size, start + init.chunkSize);
-          const chunk = file.slice(start, end);
-
-          const response = await fetch(getApiUrl('/api/file-transfers/chunk'), {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/octet-stream',
-              'X-Upload-Id': init.uploadId,
-              'X-Chunk-Index': String(chunkIndex),
-              'X-Total-Chunks': String(init.totalChunks),
-            },
-            body: chunk,
-          });
-
-          if (!response.ok) {
-            let message = 'Failed to upload file chunk';
-            try {
-              const payload = await response.json();
-              if (payload && typeof payload === 'object' && 'error' in payload) {
-                message = String((payload as Record<string, unknown>).error);
-              }
-            } catch {
-              // ignore JSON parse failure
-            }
-            throw new ApiError(message, response.status || 400);
+        if (sessionUploadId) {
+          try {
+            init = await apiFetch<{
+              uploadId: string;
+              chunkSize: number;
+              totalChunks: number;
+              uploadedChunks: number[];
+            }>(`/api/file-transfers/upload-status/${sessionUploadId}`);
+          } catch {
+            sessionUploadId = '';
           }
-
-          uploadedBytes += chunk.size;
-          const percent = Math.min(99, Math.round((uploadedBytes / file.size) * 100));
-          setUploadProgress((current) => ({
-            ...current,
-            [file.name]: percent,
-          }));
         }
+
+        if (!sessionUploadId) {
+          init = await apiFetch<{
+            uploadId: string;
+            chunkSize: number;
+            totalChunks: number;
+            uploadedChunks: number[];
+          }>('/api/file-transfers/initiate', {
+            method: 'POST',
+            body: JSON.stringify({
+              fileName: file.name,
+              fileSize: file.size,
+              fileType: file.type || 'application/octet-stream',
+              senderDeviceId: currentDeviceId,
+              receiverDeviceId: targetDeviceId,
+              transferMethod,
+            }),
+          });
+          sessionUploadId = init.uploadId;
+          storedSessions[fileFingerprint] = sessionUploadId;
+          setUploadSessionMap(storedSessions);
+        }
+
+        uploadSessionIds.current[uploadId] = sessionUploadId;
+        await uploadLargeFileInChunks(uploadId, sessionUploadId, init.chunkSize, init.totalChunks, file, init.uploadedChunks || []);
+
+        setUploadProgress((current) => ({
+          ...current,
+          [uploadId]: 98,
+        }));
 
         data = await apiFetch<FileTransfer>('/api/file-transfers/complete-upload', {
           method: 'POST',
-          body: JSON.stringify({ uploadId: init.uploadId }),
+          body: JSON.stringify({ uploadId: sessionUploadId }),
         });
+        const nextStoredSessions = getUploadSessionMap();
+        delete nextStoredSessions[fileFingerprint];
+        setUploadSessionMap(nextStoredSessions);
+        delete uploadSessionIds.current[uploadId];
       } else {
         data = await new Promise<FileTransfer>((resolve, reject) => {
           const xhr = new XMLHttpRequest();
+          registerActiveUpload(uploadId, xhr);
           xhr.open('POST', getApiUrl('/api/file-transfers/upload'));
           xhr.responseType = 'json';
           xhr.setRequestHeader('Authorization', `Bearer ${token}`);
@@ -233,7 +417,7 @@ export const useFileTransfer = () => {
             const percent = Math.round((event.loaded / event.total) * 100);
             setUploadProgress((current) => ({
               ...current,
-              [file.name]: percent,
+              [uploadId]: percent,
             }));
           };
 
@@ -272,6 +456,8 @@ export const useFileTransfer = () => {
           };
 
           xhr.send(file);
+        }).finally(() => {
+          unregisterActiveUpload(uploadId);
         });
       }
 
@@ -279,27 +465,66 @@ export const useFileTransfer = () => {
         ...data,
         user_id: data.user_id || user.id,
       };
-      cachedTransfers = [normalizedTransfer, ...cachedTransfers.filter((transfer) => transfer.id !== normalizedTransfer.id)];
+      cachedTransfers = [
+        normalizedTransfer,
+        ...cachedTransfers.filter((transfer) => transfer.id !== normalizedTransfer.id && transfer.id !== uploadId),
+      ];
       cachedTransfersUserId = user.id;
       setTransfers(cachedTransfers);
-      await fetchTransfers();
+      void fetchTransfers();
       setUploadProgress((current) => ({
         ...current,
-        [file.name]: 100,
+        [uploadId]: 100,
       }));
       toast.success(`File transfer completed: ${file.name}`);
       return data;
     } catch (err) {
       console.error('Start transfer error:', err);
-      const message = err instanceof ApiError ? err.message : 'Failed to start file transfer';
-      toast.error(message);
+      const cancelled = err instanceof Error && /cancelled/i.test(err.message);
+      cachedTransfers = cachedTransfers.map((transfer) =>
+        transfer.id === uploadId
+          ? {
+              ...transfer,
+              transfer_status: cancelled ? 'cancelled' : 'failed',
+            }
+          : transfer
+      );
+      setTransfers(cachedTransfers);
+      const message = cancelled
+        ? `${file.name} transfer cancelled`
+        : err instanceof ApiError
+          ? err.message
+          : 'Failed to start file transfer';
+      if (cancelled) {
+        toast.info(message);
+      } else {
+        toast.error(message);
+      }
     } finally {
       setUploadProgress((current) => {
         const next = { ...current };
-        delete next[file.name];
+        delete next[uploadId];
         return next;
       });
       setLoading(false);
+    }
+  };
+
+  const cancelActiveUpload = (transferId: string) => {
+    const xhrSet = activeUploadControllers.current[transferId];
+    if (!xhrSet || xhrSet.size === 0) {
+      void cancelTransfer(transferId);
+      return;
+    }
+
+    xhrSet.forEach((xhr) => xhr.abort());
+    unregisterActiveUpload(transferId);
+    const sessionUploadId = uploadSessionIds.current[transferId];
+    if (sessionUploadId) {
+      void apiFetch(`/api/file-transfers/upload-session/${sessionUploadId}`, {
+        method: 'DELETE',
+      }).catch(() => undefined);
+      delete uploadSessionIds.current[transferId];
     }
   };
 
@@ -326,37 +551,49 @@ export const useFileTransfer = () => {
     }
   };
 
-  // Download file
-  const downloadFile = async (transferId: string, fileName: string) => {
+  const deleteTransfer = async (transferId: string) => {
     if (!user) return;
 
     const token = localStorage.getItem('auth_token');
     if (!token) return;
 
+    const previousTransfers = cachedTransfers;
+    const nextTransfers = cachedTransfers.filter((transfer) => transfer.id !== transferId);
+
     try {
-      const response = await fetch(getApiUrl(`/api/file-transfers/${transferId}/download`), {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
+      cachedTransfers = nextTransfers;
+      setTransfers(nextTransfers);
+
+      await apiFetch(`/api/file-transfers/${transferId}`, {
+        method: 'DELETE',
       });
 
-      if (!response.ok) {
-        toast.error('Failed to download file');
-        return;
-      }
+      toast.success('File transfer deleted');
+    } catch (err) {
+      cachedTransfers = previousTransfers;
+      setTransfers(previousTransfers);
+      console.error('Delete transfer error:', err);
+      toast.error('Failed to delete file transfer');
+    }
+  };
 
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
+  // Download file
+  const downloadFile = async (transferId: string, fileName: string) => {
+    if (!user) return;
+
+    try {
+      const data = await apiFetch<{ signedUrl: string; fileName: string }>(`/api/file-transfers/${transferId}/download-link`);
       const a = document.createElement('a');
       a.style.display = 'none';
-      a.href = url;
-      a.download = fileName;
+      a.href = data.signedUrl;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.download = data.fileName || fileName;
       document.body.appendChild(a);
       a.click();
-      window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
-      
-      toast.success('File downloaded successfully');
+
+      toast.success('File download started');
     } catch (err) {
       console.error('Download file error:', err);
       toast.error('Failed to download file');
@@ -422,7 +659,7 @@ export const useFileTransfer = () => {
       fetchTransfers().catch(() => undefined);
     };
 
-    const interval = window.setInterval(refreshTransfers, 5000);
+    const interval = window.setInterval(refreshTransfers, 2000);
     window.addEventListener('focus', refreshTransfers);
     document.addEventListener('visibilitychange', refreshTransfers);
 
@@ -439,6 +676,8 @@ export const useFileTransfer = () => {
     uploadProgress,
     startFileTransfer,
     cancelTransfer,
+    cancelActiveUpload,
+    deleteTransfer,
     downloadFile,
     getStatusColor,
     formatFileSize,

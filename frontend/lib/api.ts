@@ -1,4 +1,10 @@
-export const API_BASE_URL = "https://unilink-backend-8tyj.onrender.com";
+const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL || "").trim();
+
+export const API_BASE_URL = configuredApiBaseUrl
+  ? configuredApiBaseUrl.replace(/\/$/, "")
+  : import.meta.env.DEV
+    ? "http://localhost:8787"
+    : "";
 export const BASE_URL = API_BASE_URL;
 export class ApiError extends Error {
   status: number;

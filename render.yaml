@@ -11,8 +11,20 @@ services:
         value: "8787"
       - key: JWT_SECRET
         sync: false
+      - key: JWT_EXPIRES_IN
+        value: 30m
+      - key: JWT_REMEMBER_ME_EXPIRES_IN
+        value: 7d
       - key: VAULT_SECRET
         sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: APP_BASE_URL
+        sync: false
+      - key: ALLOW_OTP_FALLBACK
+        value: "false"
+      - key: ALLOW_DEMO_GOOGLE_LOGIN
+        value: "false"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY

@@ -5,5 +5,14 @@ frontend/dist
 backend/dist
 backend/server/data
 .env
+.env.*
 frontend/.env
 backend/.env
+backend/.env.txt
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials.json
+service-account.json

@@ -8,11 +8,23 @@ import { Clipboard, Copy, Share, Trash2, Clock } from 'lucide-react';
 import { useClipboard } from '@/hooks/useClipboard';
 
 const ClipboardPage = () => {
-  const { clipboardHistory, loading, syncClipboard, copyToClipboard, deleteClipboardItem } = useClipboard();
+  const {
+    clipboardHistory,
+    loading,
+    clipboardWordLimit,
+    clipboardMessageLimit,
+    proActive,
+    syncClipboard,
+    copyToClipboard,
+    deleteClipboardItem,
+  } = useClipboard();
   const [newContent, setNewContent] = useState('');
+  const currentWordCount = newContent.trim() ? newContent.trim().split(/\s+/).filter(Boolean).length : 0;
+  const overWordLimit = currentWordCount > clipboardWordLimit;
+  const freeLimitReached = !proActive && clipboardMessageLimit !== null && clipboardHistory.length >= clipboardMessageLimit;
 
   const handleSync = async () => {
-    if (newContent.trim()) {
+    if (newContent.trim() && !overWordLimit) {
       await syncClipboard(newContent);
       setNewContent('');
     }
@@ -27,6 +39,16 @@ const ClipboardPage = () => {
       <div>
         <h1 className="text-3xl font-bold text-gray-900">Clipboard Sync</h1>
         <p className="text-gray-600 mt-2">Synchronize clipboard content across all your devices</p>
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
+          <Badge variant={proActive ? 'default' : 'secondary'}>
+            {proActive ? 'Pro clipboard' : 'Free clipboard'}
+          </Badge>
+          <span className="text-gray-600">
+            {proActive
+              ? 'Up to 5000 words per message with unlimited saved messages.'
+              : 'Up to 100 words per message and 10 saved messages.'}
+          </span>
+        </div>
       </div>
 
       {/* Sync New Content */}
@@ -47,10 +69,31 @@ const ClipboardPage = () => {
             onChange={(e) => setNewContent(e.target.value)}
             className="min-h-[100px]"
           />
+          <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+            <span className={overWordLimit ? 'text-red-600' : 'text-gray-500'}>
+              {currentWordCount}/{clipboardWordLimit} words
+            </span>
+            <span className={freeLimitReached ? 'text-red-600' : 'text-gray-500'}>
+              {clipboardHistory.length}
+              {clipboardMessageLimit ? `/${clipboardMessageLimit}` : ''} saved messages
+            </span>
+          </div>
+          {overWordLimit && (
+            <p className="text-sm text-red-600">
+              {proActive
+                ? 'Clipboard messages can contain up to 5000 words on Pro.'
+                : 'Free plan clipboard messages can contain up to 100 words. Upgrade to Pro for 5000-word messages.'}
+            </p>
+          )}
+          {freeLimitReached && (
+            <p className="text-sm text-red-600">
+              Free plan allows 10 clipboard messages. Delete an old message or upgrade to Pro.
+            </p>
+          )}
           <div className="flex space-x-2">
             <Button 
               onClick={handleSync} 
-              disabled={!newContent.trim() || loading}
+              disabled={!newContent.trim() || loading || overWordLimit || freeLimitReached}
             >
               <Share className="w-4 h-4 mr-2" />
               Sync to Devices
@@ -111,14 +154,6 @@ const ClipboardPage = () => {
                       >
                         <Copy className="w-4 h-4" />
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="text-red-600 hover:text-red-700"
-                        onClick={() => deleteClipboardItem(item.id)}
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </Button>
                     </div>
                   </div>
                   
@@ -135,6 +170,18 @@ const ClipboardPage = () => {
                       </p>
                     </div>
                   )}
+
+                  <div className="mt-3 flex justify-end">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="text-red-600 hover:bg-red-50 hover:text-red-700"
+                      onClick={() => deleteClipboardItem(item.id)}
+                    >
+                      <Trash2 className="w-4 h-4 mr-2" />
+                      Delete
+                    </Button>
+                  </div>
                 </div>
               ))}
             </div>

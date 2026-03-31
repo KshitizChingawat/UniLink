@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "dev": "concurrently -k \"npm run dev -w backend\" \"npm run dev -w frontend\"",
-    "build": "npm run build -w frontend && npm run build -w backend",
+    "build": "npm run build -w frontend && node scripts/sync-frontend-dist.mjs && npm run build -w backend",
     "start": "npm run start -w backend"
   },
   "devDependencies": {

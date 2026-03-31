@@ -22,6 +22,11 @@ export const useClipboard = () => {
   const [clipboardHistory, setClipboardHistory] = useState<ClipboardItem[]>(cachedClipboardHistory);
   const [loading, setLoading] = useState(() => !cachedClipboardHistory.length);
   const { user } = useAuth();
+  const proActive =
+    user?.plan === 'pro' &&
+    (!user.subscriptionExpiresAt || new Date(user.subscriptionExpiresAt).getTime() > Date.now());
+  const clipboardWordLimit = proActive ? 5000 : 100;
+  const clipboardMessageLimit = proActive ? null : 10;
 
   const getCurrentDeviceId = () => {
     if (typeof window === 'undefined') return null;
@@ -61,6 +66,21 @@ export const useClipboard = () => {
     if (!token) return;
 
     try {
+      const wordCount = content.trim().split(/\s+/).filter(Boolean).length;
+      if (wordCount > clipboardWordLimit) {
+        toast.error(
+          proActive
+            ? 'Pro clipboard messages can contain up to 5000 words.'
+            : 'Free plan clipboard messages can contain up to 100 words. Upgrade to Pro for 5000-word messages.',
+        );
+        return;
+      }
+
+      if (!proActive && clipboardHistory.length >= 10) {
+        toast.error('Free plan allows up to 10 clipboard messages. Delete an old one or upgrade to Pro.');
+        return;
+      }
+
       setLoading(true);
 
       const createdItem = await apiFetch<ClipboardItem>('/api/clipboard', {
@@ -103,14 +123,21 @@ export const useClipboard = () => {
     const token = localStorage.getItem('auth_token');
     if (!token) return;
 
+    const previousClipboardHistory = cachedClipboardHistory;
+    const nextClipboardHistory = cachedClipboardHistory.filter((item) => item.id !== itemId);
+
     try {
+      cachedClipboardHistory = nextClipboardHistory;
+      setClipboardHistory(nextClipboardHistory);
+
       await apiFetch(`/api/clipboard/${itemId}`, {
         method: 'DELETE'
       });
 
-      await fetchClipboardHistory();
       toast.success('Clipboard item deleted');
     } catch (err) {
+      cachedClipboardHistory = previousClipboardHistory;
+      setClipboardHistory(previousClipboardHistory);
       console.error('Delete clipboard item error:', err);
       toast.error('Failed to delete clipboard item');
     }
@@ -171,6 +198,9 @@ export const useClipboard = () => {
   return {
     clipboardHistory,
     loading,
+    clipboardWordLimit,
+    clipboardMessageLimit,
+    proActive,
     syncClipboard,
     copyToClipboard,
     deleteClipboardItem,

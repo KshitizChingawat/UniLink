@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Upload, Download, Send, X, FileText, Image, Video, Archive, Play, Crown } from 'lucide-react';
+import { Upload, Download, Send, X, FileText, Image, Video, Archive, Play, Crown, Trash2 } from 'lucide-react';
 import { useFileTransfer } from '@/hooks/useFileTransfer';
 import { useDevices } from '@/hooks/useDevices';
 import { useDropzone } from 'react-dropzone';
@@ -15,7 +15,7 @@ import { BASE_URL } from '@/lib/api';
 
 const FileTransferPage = () => {
   const { user } = useAuth();
-  const { transfers, loading, uploadProgress, startFileTransfer, cancelTransfer, downloadFile } = useFileTransfer();
+  const { transfers, loading, uploadProgress, startFileTransfer, cancelActiveUpload, deleteTransfer, downloadFile } = useFileTransfer();
   const { devices } = useDevices();
   const [selectedDevice, setSelectedDevice] = useState<string>('all');
   const [previewUrl, setPreviewUrl] = useState('');
@@ -108,6 +108,9 @@ const FileTransferPage = () => {
   };
 
   const getTransferProgress = (transfer: any) => {
+    if (getTransferField(transfer, 'transferStatus') === 'in_progress' && uploadProgress[transfer.id] !== undefined) {
+      return uploadProgress[transfer.id];
+    }
     const status = getTransferField(transfer, 'transferStatus');
     switch (status) {
       case 'completed': return 100;
@@ -217,15 +220,30 @@ const FileTransferPage = () => {
         <CardContent className="space-y-4">
           {Object.entries(uploadProgress).length > 0 ? (
             <div className="space-y-3 rounded-xl border border-unilink-200 bg-unilink-50/70 p-4">
-              {Object.entries(uploadProgress).map(([name, percent]) => (
-                <div key={name} className="space-y-2">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="truncate font-medium text-gray-900">{name}</span>
-                    <span className="text-gray-600">{percent}%</span>
+              {Object.entries(uploadProgress).map(([uploadId, percent]) => {
+                const activeTransfer = transfers.find((transfer) => transfer.id === uploadId);
+                const activeName = activeTransfer ? getTransferField(activeTransfer, 'fileName') : uploadId;
+                return (
+                  <div key={uploadId} className="space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-sm">
+                      <span className="truncate font-medium text-gray-900">{activeName}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-gray-600">{percent}%</span>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          type="button"
+                          onClick={() => cancelActiveUpload(uploadId)}
+                        >
+                          <X className="mr-1 h-4 w-4" />
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                    <Progress value={percent} className="h-2" />
                   </div>
-                  <Progress value={percent} className="h-2" />
-                </div>
-              ))}
+                );
+              })}
             </div>
           ) : null}
 
@@ -345,7 +363,7 @@ const FileTransferPage = () => {
                         <Button
                           size="sm"
                           variant="outline"
-                          onClick={() => cancelTransfer(transfer.id)}
+                          onClick={() => cancelActiveUpload(transfer.id)}
                         >
                           <X className="w-4 h-4" />
                         </Button>
@@ -365,6 +383,20 @@ const FileTransferPage = () => {
                       </span>
                     </div>
                   </div>
+
+                  {getTransferField(transfer, 'transferStatus') !== 'in_progress' && (
+                    <div className="mt-3 flex justify-end">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-red-600 hover:bg-red-50 hover:text-red-700"
+                        onClick={() => deleteTransfer(transfer.id)}
+                      >
+                        <Trash2 className="mr-2 h-4 w-4" />
+                        Delete
+                      </Button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
