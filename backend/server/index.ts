@@ -260,6 +260,7 @@ interface PendingUploadSession {
 const uploadSessions = new Map<string, PendingUploadSession>();
 const LARGE_UPLOAD_CHUNK_BYTES = 6 * 1024 * 1024;
 const UPLOAD_TEMP_ROOT = path.join(os.tmpdir(), "unilink-upload-sessions");
+const UPLOAD_SESSION_STALE_MS = 30 * 60 * 1000;
 
 const isSubscriptionActive = (user: UserRecord) =>
   user.role === "admin" ||
@@ -414,6 +415,34 @@ const cleanupUploadSession = async (session: PendingUploadSession | undefined | 
   if (!session) return;
   uploadSessions.delete(session.id);
   await rm(session.tempDir, { recursive: true, force: true }).catch(() => undefined);
+};
+
+const cleanupStaleUploadSessions = async () => {
+  const cutoff = Date.now() - UPLOAD_SESSION_STALE_MS;
+  const staleSessions = Array.from(uploadSessions.values()).filter(
+    (session) => new Date(session.updatedAt || session.createdAt).getTime() < cutoff,
+  );
+
+  if (staleSessions.length === 0) return;
+
+  const db = await loadDb();
+  let dbChanged = false;
+
+  for (const session of staleSessions) {
+    const transfer = db.fileTransfers.find(
+      (entry) => entry.id === session.transferId && entry.userId === session.userId,
+    );
+    if (transfer && transfer.transferStatus === "in_progress") {
+      transfer.transferStatus = "failed";
+      transfer.completedAt = nowIso();
+      dbChanged = true;
+    }
+    await cleanupUploadSession(session);
+  }
+
+  if (dbChanged) {
+    await saveDb(db);
+  }
 };
 
 const userResponse = (user: UserRecord) => {
@@ -1310,6 +1339,7 @@ app.get("/api/file-transfers", requireAuth, async (req: AuthenticatedRequest, re
 });
 
 app.post("/api/file-transfers/initiate", requireAuth, async (req: AuthenticatedRequest, res) => {
+  await cleanupStaleUploadSessions();
   const parsed = uploadInitSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid upload metadata" });
@@ -1393,6 +1423,7 @@ app.post("/api/file-transfers/initiate", requireAuth, async (req: AuthenticatedR
 });
 
 app.get("/api/file-transfers/upload-status/:uploadId", requireAuth, async (req: AuthenticatedRequest, res) => {
+  await cleanupStaleUploadSessions();
   const uploadId = typeof req.params.uploadId === "string" ? req.params.uploadId : "";
   if (!uploadId) {
     res.status(400).json({ error: "Upload session ID is required." });
@@ -1406,16 +1437,23 @@ app.get("/api/file-transfers/upload-status/:uploadId", requireAuth, async (req: 
   }
 
   const uploadedChunks = await getUploadedChunkIndices(session);
+  const db = await loadDb();
+  const transfer = db.fileTransfers.find(
+    (entry) => entry.id === session.transferId && entry.userId === req.auth!.userId,
+  );
   res.json({
     uploadId: session.id,
     transferId: session.transferId,
     chunkSize: session.chunkSize,
     totalChunks: session.totalChunks,
     uploadedChunks,
+    processing: Boolean(session.isCompleting),
+    transferStatus: transfer?.transferStatus || "in_progress",
   });
 });
 
 app.delete("/api/file-transfers/upload-session/:uploadId", requireAuth, async (req: AuthenticatedRequest, res) => {
+  await cleanupStaleUploadSessions();
   const uploadId = typeof req.params.uploadId === "string" ? req.params.uploadId : "";
   if (!uploadId) {
     res.status(400).json({ error: "Upload session ID is required." });
@@ -1443,6 +1481,7 @@ app.delete("/api/file-transfers/upload-session/:uploadId", requireAuth, async (r
 });
 
 app.post("/api/file-transfers/chunk", requireAuth, async (req: AuthenticatedRequest, res) => {
+  await cleanupStaleUploadSessions();
   const parsed = parseUploadChunkHeaders(req.headers);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid upload chunk metadata" });
@@ -1522,6 +1561,7 @@ app.post("/api/file-transfers/chunk", requireAuth, async (req: AuthenticatedRequ
 });
 
 app.post("/api/file-transfers/complete-upload", requireAuth, async (req: AuthenticatedRequest, res) => {
+  await cleanupStaleUploadSessions();
   const uploadId = typeof req.body?.uploadId === "string" ? req.body.uploadId : "";
   if (!uploadId) {
     res.status(400).json({ error: "Upload session ID is required." });
