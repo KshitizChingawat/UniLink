@@ -208,7 +208,7 @@ const uploadChunkHeadersSchema = z.object({
     "x-total-chunks": z.coerce.number().int().min(1),
 });
 const uploadSessions = new Map();
-const LARGE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+const LARGE_UPLOAD_CHUNK_BYTES = 6 * 1024 * 1024;
 const UPLOAD_TEMP_ROOT = path.join(os.tmpdir(), "unilink-upload-sessions");
 const isSubscriptionActive = (user) => user.role === "admin" ||
     (user.plan === "pro" &&
@@ -300,12 +300,17 @@ const parseUploadChunkHeaders = (headers) => uploadChunkHeadersSchema.safeParse(
 });
 const getUploadChunkPath = (session, chunkIndex) => path.join(session.tempDir, `${String(chunkIndex).padStart(6, "0")}.part`);
 const getUploadedChunkIndices = async (session) => {
+    if (session.uploadedChunks.size > 0) {
+        return Array.from(session.uploadedChunks).sort((a, b) => a - b);
+    }
     const entries = await readdir(session.tempDir).catch(() => []);
-    return entries
+    const uploadedChunks = entries
         .filter((entry) => entry.endsWith(".part"))
         .map((entry) => Number.parseInt(entry.replace(".part", ""), 10))
         .filter((value) => Number.isInteger(value) && value >= 0 && value < session.totalChunks)
         .sort((a, b) => a - b);
+    session.uploadedChunks = new Set(uploadedChunks);
+    return uploadedChunks;
 };
 const cleanupUploadSession = async (session) => {
     if (!session)
@@ -1120,8 +1125,25 @@ app.post("/api/file-transfers/initiate", requireAuth, async (req, res) => {
         chunkSize: LARGE_UPLOAD_CHUNK_BYTES,
         totalChunks: Math.ceil(parsed.data.fileSize / LARGE_UPLOAD_CHUNK_BYTES),
         createdAt: nowIso(),
+        updatedAt: nowIso(),
+        uploadedChunks: new Set(),
     };
     uploadSessions.set(uploadId, session);
+    const transfer = {
+        id: transferId,
+        userId: req.auth.userId,
+        senderDeviceId: parsed.data.senderDeviceId,
+        receiverDeviceId: parsed.data.receiverDeviceId,
+        fileName: parsed.data.fileName,
+        fileSize: parsed.data.fileSize,
+        fileType: parsed.data.fileType,
+        transferStatus: "in_progress",
+        transferMethod: parsed.data.transferMethod,
+        createdAt: session.createdAt,
+        filePath: storagePath,
+    };
+    db.fileTransfers = [transfer, ...db.fileTransfers.filter((entry) => entry.id !== transfer.id)];
+    await saveDb(db);
     res.status(201).json({
         uploadId: session.id,
         transferId: session.transferId,
@@ -1163,6 +1185,13 @@ app.delete("/api/file-transfers/upload-session/:uploadId", requireAuth, async (r
         res.status(404).json({ error: "Upload session not found" });
         return;
     }
+    const db = await loadDb();
+    const transfer = db.fileTransfers.find((entry) => entry.id === session.transferId && entry.userId === req.auth.userId);
+    if (transfer && transfer.transferStatus === "in_progress") {
+        transfer.transferStatus = "cancelled";
+        transfer.completedAt = nowIso();
+        await saveDb(db);
+    }
     await cleanupUploadSession(session);
     res.status(204).send();
 });
@@ -1191,6 +1220,7 @@ app.post("/api/file-transfers/chunk", requireAuth, async (req, res) => {
         : session.chunkSize;
     const existingChunkIndices = await getUploadedChunkIndices(session);
     if (existingChunkIndices.includes(chunkIndex)) {
+        session.updatedAt = nowIso();
         res.status(200).json({
             uploadId: session.id,
             chunkIndex,
@@ -1199,6 +1229,7 @@ app.post("/api/file-transfers/chunk", requireAuth, async (req, res) => {
         });
         return;
     }
+    session.updatedAt = nowIso();
     const chunkPath = getUploadChunkPath(session, chunkIndex);
     let bytesWritten = 0;
     try {
@@ -1223,6 +1254,8 @@ app.post("/api/file-transfers/chunk", requireAuth, async (req, res) => {
         res.status(400).json({ error: "Uploaded chunk size did not match the expected size." });
         return;
     }
+    session.uploadedChunks.add(chunkIndex);
+    session.updatedAt = nowIso();
     res.status(201).json({
         uploadId: session.id,
         chunkIndex,
@@ -1240,11 +1273,26 @@ app.post("/api/file-transfers/complete-upload", requireAuth, async (req, res) =>
         res.status(404).json({ error: "Upload session not found" });
         return;
     }
+    const db = await loadDb();
+    const existingTransfer = db.fileTransfers.find((entry) => entry.id === session.transferId && entry.userId === req.auth.userId);
+    if (existingTransfer?.transferStatus === "completed") {
+        res.status(200).json(existingTransfer);
+        return;
+    }
+    if (session.isCompleting) {
+        res.status(202).json({
+            transferId: session.transferId,
+            transfer_status: "in_progress",
+            processing: true,
+        });
+        return;
+    }
+    session.isCompleting = true;
+    session.updatedAt = nowIso();
     try {
-        const chunkFiles = (await readdir(session.tempDir))
-            .filter((entry) => entry.endsWith(".part"))
-            .sort();
-        if (chunkFiles.length !== session.totalChunks) {
+        const uploadedChunkIndices = await getUploadedChunkIndices(session);
+        if (uploadedChunkIndices.length !== session.totalChunks) {
+            session.isCompleting = false;
             res.status(400).json({ error: "Upload is incomplete. Some chunks are missing." });
             return;
         }
@@ -1252,11 +1300,11 @@ app.post("/api/file-transfers/complete-upload", requireAuth, async (req, res) =>
         await new Promise((resolve, reject) => {
             const output = createWriteStream(assembledPath);
             const appendNext = (index) => {
-                if (index >= chunkFiles.length) {
+                if (index >= uploadedChunkIndices.length) {
                     output.end();
                     return;
                 }
-                const input = createReadStream(path.join(session.tempDir, chunkFiles[index]));
+                const input = createReadStream(getUploadChunkPath(session, uploadedChunkIndices[index]));
                 input.on("error", reject);
                 input.on("end", () => appendNext(index + 1));
                 input.pipe(output, { end: false });
@@ -1276,27 +1324,45 @@ app.post("/api/file-transfers/complete-upload", requireAuth, async (req, res) =>
             res.status(500).json({ error: "Failed to store file. Please try again." });
             return;
         }
-        const db = await loadDb();
-        const transfer = {
-            id: session.transferId,
-            userId: req.auth.userId,
-            senderDeviceId: session.senderDeviceId,
-            receiverDeviceId: session.receiverDeviceId,
-            fileName: session.fileName,
-            fileSize: session.fileSize,
-            fileType: session.fileType,
-            transferStatus: "completed",
-            transferMethod: session.transferMethod,
-            createdAt: session.createdAt,
-            completedAt: nowIso(),
-            filePath: session.storagePath,
-        };
-        db.fileTransfers.unshift(transfer);
+        const transfer = existingTransfer ||
+            {
+                id: session.transferId,
+                userId: req.auth.userId,
+                senderDeviceId: session.senderDeviceId,
+                receiverDeviceId: session.receiverDeviceId,
+                fileName: session.fileName,
+                fileSize: session.fileSize,
+                fileType: session.fileType,
+                transferStatus: "in_progress",
+                transferMethod: session.transferMethod,
+                createdAt: session.createdAt,
+                filePath: session.storagePath,
+            };
+        transfer.transferStatus = "completed";
+        transfer.completedAt = nowIso();
+        transfer.filePath = session.storagePath;
+        transfer.fileName = session.fileName;
+        transfer.fileSize = session.fileSize;
+        transfer.fileType = session.fileType;
+        transfer.senderDeviceId = session.senderDeviceId;
+        transfer.receiverDeviceId = session.receiverDeviceId;
+        transfer.transferMethod = session.transferMethod;
+        db.fileTransfers = [
+            transfer,
+            ...db.fileTransfers.filter((entry) => entry.id !== transfer.id),
+        ];
         await saveDb(db);
         await cleanupUploadSession(session);
-        res.status(201).json(transfer);
+        res.status(existingTransfer ? 200 : 201).json(transfer);
     }
     catch (error) {
+        session.isCompleting = false;
+        const failedTransfer = db.fileTransfers.find((entry) => entry.id === session.transferId && entry.userId === req.auth.userId);
+        if (failedTransfer && failedTransfer.transferStatus === "in_progress") {
+            failedTransfer.transferStatus = "failed";
+            failedTransfer.completedAt = nowIso();
+            await saveDb(db);
+        }
         console.error("Complete upload error:", error);
         res.status(500).json({ error: "Failed to finalize upload." });
     }

@@ -33,6 +33,9 @@ export const useFileTransfer = () => {
   const chunkSizeThreshold = 25 * 1024 * 1024;
   const chunkUploadConcurrency = 4;
   const chunkRetryLimit = 3;
+  const chunkRequestTimeoutMs = 90_000;
+  const processingPollIntervalMs = 2_500;
+  const processingPollLimit = 48;
 
   const getUploadSessionMap = () => {
     if (typeof window === 'undefined') return {} as Record<string, string>;
@@ -145,6 +148,33 @@ export const useFileTransfer = () => {
     }
   };
 
+  const rekeyUploadTracking = (fromId: string, toId: string) => {
+    if (fromId === toId) return;
+
+    setUploadProgress((current) => {
+      if (!(fromId in current)) return current;
+      const next = { ...current };
+      next[toId] = next[fromId];
+      delete next[fromId];
+      return next;
+    });
+
+    if (activeUploadControllers.current[fromId]) {
+      activeUploadControllers.current[toId] = activeUploadControllers.current[fromId];
+      delete activeUploadControllers.current[fromId];
+    }
+
+    if (uploadSessionIds.current[fromId]) {
+      uploadSessionIds.current[toId] = uploadSessionIds.current[fromId];
+      delete uploadSessionIds.current[fromId];
+    }
+
+    cachedTransfers = cachedTransfers.map((transfer) =>
+      transfer.id === fromId ? { ...transfer, id: toId } : transfer,
+    );
+    setTransfers(cachedTransfers);
+  };
+
   const createPendingTransfer = (
     uploadId: string,
     file: File,
@@ -211,7 +241,7 @@ export const useFileTransfer = () => {
             xhr = new XMLHttpRequest();
             registerActiveUpload(uploadId, xhr);
             xhr.open('POST', getApiUrl('/api/file-transfers/chunk'));
-            xhr.timeout = 0;
+            xhr.timeout = chunkRequestTimeoutMs;
             xhr.setRequestHeader('Authorization', `Bearer ${localStorage.getItem('auth_token')}`);
             xhr.setRequestHeader('Content-Type', 'application/octet-stream');
             xhr.setRequestHeader('X-Upload-Id', sessionUploadId);
@@ -249,6 +279,7 @@ export const useFileTransfer = () => {
             };
 
             xhr.onerror = () => reject(new Error('Large file upload failed. Please check your connection and try again.'));
+            xhr.ontimeout = () => reject(new Error('Large file upload chunk timed out. Retrying...'));
             xhr.onabort = () => reject(new Error('Large file upload was cancelled'));
             xhr.send(chunk);
           });
@@ -258,6 +289,7 @@ export const useFileTransfer = () => {
           if (cancelled || attempt === chunkRetryLimit - 1) {
             throw error;
           }
+          await new Promise((resolve) => window.setTimeout(resolve, 800 * (attempt + 1)));
         } finally {
           delete activeChunkProgress[chunkIndex];
           updateUploadProgress(uploadId, file.size, completedChunkBytes, activeChunkProgress);
@@ -280,6 +312,38 @@ export const useFileTransfer = () => {
     });
 
     await Promise.all(workers);
+  };
+
+  const pollCompletedTransfer = async (transferId: string) => {
+    for (let attempt = 0; attempt < processingPollLimit; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, processingPollIntervalMs));
+      try {
+        const latestTransfers = await apiFetch<FileTransfer[]>('/api/file-transfers');
+        cachedTransfers = latestTransfers || [];
+        if (user) {
+          cachedTransfersUserId = user.id;
+        }
+        setTransfers(cachedTransfers);
+
+        const completedTransfer = latestTransfers.find((entry) => entry.id === transferId);
+        if (completedTransfer && getTransferFieldValue(completedTransfer, 'transfer_status', 'transferStatus') === 'completed') {
+          return completedTransfer;
+        }
+      } catch {
+        // Ignore polling errors; the next poll or background refresh can recover.
+      }
+    }
+
+    return null;
+  };
+
+  const getTransferFieldValue = <T = unknown,>(transfer: Record<string, unknown>, ...keys: string[]) => {
+    for (const key of keys) {
+      if (transfer[key] !== undefined) {
+        return transfer[key] as T;
+      }
+    }
+    return undefined;
   };
 
   // Fetch file transfers
@@ -317,7 +381,7 @@ export const useFileTransfer = () => {
 
     const token = localStorage.getItem('auth_token');
     if (!token) return;
-    const uploadId = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    let uploadId = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     try {
       const currentDeviceId = await ensureCurrentDeviceId();
@@ -339,6 +403,7 @@ export const useFileTransfer = () => {
         let sessionUploadId = storedSessions[fileFingerprint] || '';
         let init: {
           uploadId: string;
+          transferId: string;
           chunkSize: number;
           totalChunks: number;
           uploadedChunks?: number[];
@@ -348,10 +413,13 @@ export const useFileTransfer = () => {
           try {
             init = await apiFetch<{
               uploadId: string;
+              transferId: string;
               chunkSize: number;
               totalChunks: number;
               uploadedChunks: number[];
             }>(`/api/file-transfers/upload-status/${sessionUploadId}`);
+            rekeyUploadTracking(uploadId, init.transferId);
+            uploadId = init.transferId;
           } catch {
             sessionUploadId = '';
           }
@@ -363,6 +431,7 @@ export const useFileTransfer = () => {
             chunkSize: number;
             totalChunks: number;
             uploadedChunks: number[];
+            transferId: string;
           }>('/api/file-transfers/initiate', {
             method: 'POST',
             body: JSON.stringify({
@@ -379,6 +448,8 @@ export const useFileTransfer = () => {
           setUploadSessionMap(storedSessions);
         }
 
+        rekeyUploadTracking(uploadId, init.transferId);
+        uploadId = init.transferId;
         uploadSessionIds.current[uploadId] = sessionUploadId;
         await uploadLargeFileInChunks(uploadId, sessionUploadId, init.chunkSize, init.totalChunks, file, init.uploadedChunks || []);
 
@@ -387,10 +458,19 @@ export const useFileTransfer = () => {
           [uploadId]: 98,
         }));
 
-        data = await apiFetch<FileTransfer>('/api/file-transfers/complete-upload', {
+        const completionResponse = await apiFetch<FileTransfer | { transferId: string; processing: boolean }>('/api/file-transfers/complete-upload', {
           method: 'POST',
           body: JSON.stringify({ uploadId: sessionUploadId }),
         });
+        if ('processing' in completionResponse && completionResponse.processing) {
+          const completedTransfer = await pollCompletedTransfer(completionResponse.transferId);
+          if (!completedTransfer) {
+            throw new Error('File processing is taking too long. Please keep the app open while we finish syncing it.');
+          }
+          data = completedTransfer;
+        } else {
+          data = completionResponse;
+        }
         const nextStoredSessions = getUploadSessionMap();
         delete nextStoredSessions[fileFingerprint];
         setUploadSessionMap(nextStoredSessions);
