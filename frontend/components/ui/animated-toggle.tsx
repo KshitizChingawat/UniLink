@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { SendHorizonal, Smartphone } from 'lucide-react';
+import { ArrowRight, Smartphone } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface AnimatedToggleProps {
@@ -94,10 +94,10 @@ const AnimatedToggle = ({
             className={cn(
               'relative z-10 flex h-7 w-7 items-center justify-center transition-transform duration-500',
               isConnected
-                ? 'rotate-90 scale-105'
+                ? 'scale-105'
                 : isReady
-                  ? 'rotate-0 scale-100 group-hover:translate-x-0.5 group-hover:-translate-y-0.5'
-                  : 'rotate-0',
+                  ? 'scale-100 group-hover:translate-x-0.5'
+                  : 'scale-100',
             )}
           >
             <div className="absolute inset-1 rounded-full border border-current/15" />
@@ -107,7 +107,14 @@ const AnimatedToggle = ({
                 isReady || isConnected ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
               )}
             />
-            <SendHorizonal className="h-4.5 w-4.5 drop-shadow-[0_1px_2px_rgba(255,255,255,0.35)]" strokeWidth={2.1} />
+            <div
+              className={cn(
+                'h-5 w-5 transition-transform duration-500',
+                isAnimating || isConnected ? 'rotate-90' : 'rotate-0',
+              )}
+            >
+              <div className="mx-auto mt-2 h-0.5 w-4 rounded-full bg-current shadow-[0_1px_2px_rgba(255,255,255,0.35)]" />
+            </div>
           </div>
           {(isReady || isConnected) && (
             <>
@@ -125,6 +132,15 @@ const AnimatedToggle = ({
               isAnimating || isConnected ? 'w-full opacity-100' : 'w-0 opacity-0',
             )}
           />
+          <div
+            className={cn(
+              'absolute top-1/2 z-10 -translate-y-1/2 text-white transition-all duration-700',
+              isAnimating || isConnected ? 'opacity-100' : 'opacity-0',
+            )}
+            style={{ left: isAnimating || isConnected ? 'calc(100% - 1.4rem)' : '0.35rem' }}
+          >
+            <ArrowRight className="h-3.5 w-3.5 drop-shadow-[0_0_10px_rgba(255,255,255,0.85)]" strokeWidth={2.2} />
+          </div>
           {(isAnimating || isConnected) && (
             <div className="absolute inset-y-[2px] left-0 w-10 rounded-full bg-white/40 blur-sm animate-[pulse_1.4s_ease-in-out_infinite]" />
           )}
