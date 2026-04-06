@@ -99,15 +99,20 @@ const AnalyticsPage = () => {
               <CardContent>
                 <div className="space-y-4">
                   {transfers.slice(0, 5).map((transfer) => (
-                    <div key={transfer.id} className="flex items-center space-x-4">
-                      <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
-                      <div className="flex-1">
-                        <p className="text-sm font-medium">{transfer.fileName}</p>
+                    <div key={transfer.id} className="flex items-start gap-4">
+                      <div className="mt-2 h-2 w-2 shrink-0 rounded-full bg-blue-500"></div>
+                      <div className="min-w-0 flex-1">
+                        <p
+                          className="truncate text-sm font-medium"
+                          title={transfer.fileName}
+                        >
+                          {transfer.fileName}
+                        </p>
                         <p className="text-xs text-muted-foreground">
                           {new Date(transfer.createdAt).toLocaleString()}
                         </p>
                       </div>
-                      <span className={`text-xs px-2 py-1 rounded ${
+                      <span className={`shrink-0 whitespace-nowrap rounded px-2 py-1 text-xs ${
                         transfer.transferStatus === 'completed' ? 'bg-green-100 text-green-800' :
                         transfer.transferStatus === 'pending' ? 'bg-yellow-100 text-yellow-800' :
                         'bg-red-100 text-red-800'
