@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Smartphone } from 'lucide-react';
+import { SendHorizonal, Smartphone } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface AnimatedToggleProps {
@@ -92,11 +92,22 @@ const AnimatedToggle = ({
           />
           <div
             className={cn(
-              'relative z-10 h-5 w-5 transition-transform duration-500',
-              isConnected ? 'rotate-90 scale-105' : isReady ? 'rotate-0 scale-100 group-hover:translate-x-0.5' : 'rotate-0',
+              'relative z-10 flex h-7 w-7 items-center justify-center transition-transform duration-500',
+              isConnected
+                ? 'rotate-90 scale-105'
+                : isReady
+                  ? 'rotate-0 scale-100 group-hover:translate-x-0.5 group-hover:-translate-y-0.5'
+                  : 'rotate-0',
             )}
           >
-            <div className="mx-auto mt-2 h-0.5 w-4 rounded-full bg-current" />
+            <div className="absolute inset-1 rounded-full border border-current/15" />
+            <div
+              className={cn(
+                'absolute inset-0 rounded-full border border-current/10 transition-all duration-500',
+                isReady || isConnected ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
+              )}
+            />
+            <SendHorizonal className="h-4.5 w-4.5 drop-shadow-[0_1px_2px_rgba(255,255,255,0.35)]" strokeWidth={2.1} />
           </div>
           {(isReady || isConnected) && (
             <>
@@ -137,7 +148,32 @@ const AnimatedToggle = ({
           )}
         >
           <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_25%,rgba(255,255,255,0.92),rgba(255,255,255,0.28)_42%,transparent_72%)]" />
-          <Smartphone className={cn('relative z-10 h-7 w-7 transition-transform duration-500', isAnimating ? 'scale-105' : '', isConnected ? 'scale-105' : '')} />
+          <div className="absolute inset-0 rounded-2xl bg-[linear-gradient(160deg,rgba(255,255,255,0.22),transparent_55%)]" />
+          <Smartphone
+            className={cn(
+              'relative z-10 h-7 w-7 transition-transform duration-500',
+              isAnimating ? 'scale-105' : '',
+              isConnected ? 'scale-105' : '',
+            )}
+          />
+          <div className="absolute bottom-3 left-1/2 z-10 h-0.5 w-3 -translate-x-1/2 rounded-full bg-current/35" />
+          {(isReady || isAnimating || isConnected) && (
+            <>
+              <div className="absolute right-3 top-3 h-1.5 w-1.5 rounded-full bg-current/75" />
+              <div
+                className={cn(
+                  'absolute right-[11px] top-[10px] h-3.5 w-3.5 rounded-full border border-current/25 transition-all duration-500',
+                  isAnimating || isConnected ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
+                )}
+              />
+              <div
+                className={cn(
+                  'absolute right-[9px] top-[8px] h-5 w-5 rounded-full border border-current/15 transition-all duration-500',
+                  isAnimating || isConnected ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
+                )}
+              />
+            </>
+          )}
           {(isAnimating || isConnected) && (
             <div className="absolute inset-0 rounded-2xl bg-unilink-500/10 animate-pulse-glow" />
           )}
