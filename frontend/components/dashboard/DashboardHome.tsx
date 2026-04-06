@@ -156,14 +156,19 @@ const DashboardHome = () => {
             {recentTransfers.length > 0 ? (
               <div className="space-y-3">
                 {recentTransfers.map((transfer) => (
-                  <div key={transfer.id} className="flex items-center justify-between p-2 border rounded-lg">
-                    <div>
-                      <p className="font-medium">{transfer.fileName}</p>
+                  <div key={transfer.id} className="flex items-start gap-3 rounded-lg border p-2">
+                    <div className="min-w-0 flex-1">
+                      <p
+                        className="break-words font-medium leading-snug"
+                        title={transfer.fileName}
+                      >
+                        {transfer.fileName}
+                      </p>
                       <p className="text-sm text-gray-500">
                         {(transfer.fileSize / 1024 / 1024).toFixed(2)} MB
                       </p>
                     </div>
-                    <span className={`text-xs px-2 py-1 rounded ${
+                    <span className={`shrink-0 whitespace-nowrap rounded px-2 py-1 text-xs ${
                       transfer.transferStatus === 'completed' ? 'bg-green-100 text-green-800' :
                       transfer.transferStatus === 'pending' ? 'bg-yellow-100 text-yellow-800' :
                       'bg-red-100 text-red-800'
