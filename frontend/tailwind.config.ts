@@ -95,6 +95,10 @@ const config: Config = {
           from: { opacity: "0" },
           to: { opacity: "1" },
         },
+        shimmer: {
+          "0%": { transform: "translateX(-100%)" },
+          "100%": { transform: "translateX(100%)" },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
@@ -104,6 +108,7 @@ const config: Config = {
         "pulse-glow": "pulse-glow 6s ease-in-out infinite",
         "slide-in": "slide-in 0.8s ease-out",
         "fade-in": "fade-in 0.4s ease-out",
+        shimmer: "shimmer 2.8s linear infinite",
       },
     },
   },
