@@ -136,9 +136,9 @@ const ClipboardPage = () => {
                 </div>
               )}
               {clipboardHistory.map((item) => (
-                <div key={item.id} className="border rounded-lg p-4 hover:bg-gray-50 transition-colors">
-                  <div className="flex justify-between items-start mb-2">
-                    <div className="flex items-center space-x-2">
+                <div key={item.id} className="rounded-lg border p-4 transition-colors hover:bg-gray-50">
+                  <div className="mb-2 flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex items-center space-x-2">
                       <Badge variant="outline" className="text-xs">
                         {item.contentType}
                       </Badge>
@@ -146,7 +146,7 @@ const ClipboardPage = () => {
                         {new Date(item.syncTimestamp).toLocaleString()}
                       </span>
                     </div>
-                    <div className="flex space-x-2">
+                    <div className="flex shrink-0 space-x-2">
                       <Button
                         size="sm"
                         variant="outline"
@@ -157,8 +157,8 @@ const ClipboardPage = () => {
                     </div>
                   </div>
                   
-                  <div className="bg-gray-100 rounded p-3 max-h-32 overflow-y-auto">
-                    <pre className="text-sm whitespace-pre-wrap break-words">
+                  <div className="max-h-32 overflow-y-auto overflow-x-hidden rounded bg-gray-100 p-3">
+                    <pre className="max-w-full whitespace-pre-wrap break-all text-sm [overflow-wrap:anywhere]">
                       {item.content}
                     </pre>
                   </div>
