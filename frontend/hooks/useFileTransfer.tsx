@@ -30,7 +30,9 @@ export const useFileTransfer = () => {
   const activeUploadControllers = useRef<Record<string, Set<XMLHttpRequest>>>({});
   const uploadSessionIds = useRef<Record<string, string>>({});
   const { user } = useAuth();
-  const chunkSizeThreshold = 25 * 1024 * 1024;
+  // Route medium and large files through the resumable chunk path so uploads
+  // stay responsive on hosted environments instead of waiting on one big relay.
+  const chunkSizeThreshold = 8 * 1024 * 1024;
   const chunkUploadConcurrency = 4;
   const chunkRetryLimit = 3;
   const chunkRequestTimeoutMs = 90_000;
