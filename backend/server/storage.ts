@@ -16,8 +16,6 @@ const initialDb: AppDatabase = {
   emailVerifications: [],
 };
 
-let dbCache: AppDatabase | null = null;
-// Write-lock: queue concurrent saveDb calls so they don't race and corrupt db.json
 let writeLock: Promise<void> = Promise.resolve();
 
 const normalizeUser = (user: UserRecord): UserRecord => ({
@@ -70,23 +68,66 @@ const writeDb = async (json: string): Promise<void> => {
   if (error) throw new Error(`Failed to save database: ${error.message}`);
 };
 
+const sortByCreatedAt = <T extends { createdAt?: string }>(records: T[]): T[] =>
+  [...records].sort((left, right) => {
+    const leftTime = left.createdAt ? Date.parse(left.createdAt) : 0;
+    const rightTime = right.createdAt ? Date.parse(right.createdAt) : 0;
+    return leftTime - rightTime;
+  });
+
+const mergeById = <T extends { id: string }>(remote: T[], local: T[]): T[] => {
+  const merged = new Map<string, T>();
+  for (const record of remote) merged.set(record.id, record);
+  for (const record of local) merged.set(record.id, record);
+  return [...merged.values()];
+};
+
+const mergeUsers = (remote: UserRecord[], local: UserRecord[]): UserRecord[] => {
+  const byId = mergeById(
+    remote.map((user) => normalizeUser(user)),
+    local.map((user) => normalizeUser(user)),
+  );
+  const byEmail = new Map<string, UserRecord>();
+
+  for (const user of byId) {
+    byEmail.set(user.email.toLowerCase(), user);
+  }
+
+  return sortByCreatedAt([...byEmail.values()]);
+};
+
+const mergeDb = (remote: AppDatabase, local: AppDatabase): AppDatabase => ({
+  users: mergeUsers(remote.users, local.users),
+  devices: sortByCreatedAt(mergeById(remote.devices, local.devices)),
+  clipboard: sortByCreatedAt(mergeById(remote.clipboard, local.clipboard)),
+  fileTransfers: sortByCreatedAt(mergeById(remote.fileTransfers, local.fileTransfers)),
+  vault: sortByCreatedAt(mergeById(remote.vault, local.vault)),
+  aiSuggestions: sortByCreatedAt(mergeById(remote.aiSuggestions, local.aiSuggestions)),
+  bluetoothDevices: sortByCreatedAt(mergeById(remote.bluetoothDevices, local.bluetoothDevices)),
+  pairSessions: sortByCreatedAt(mergeById(remote.pairSessions, local.pairSessions)),
+  emailVerifications: sortByCreatedAt(mergeById(remote.emailVerifications, local.emailVerifications)),
+});
+
 export const loadDb = async (): Promise<AppDatabase> => {
-  if (dbCache) return dbCache;
   try {
     const raw = await readDb();
-    dbCache = normalizeDb(raw ? (JSON.parse(raw) as Partial<AppDatabase>) : null);
+    return normalizeDb(raw ? (JSON.parse(raw) as Partial<AppDatabase>) : null);
   } catch {
-    dbCache = { ...initialDb };
-    await writeDb(JSON.stringify(dbCache, null, 2));
+    const nextDb = { ...initialDb };
+    await writeDb(JSON.stringify(nextDb, null, 2));
+    return nextDb;
   }
-  return dbCache;
 };
 
 export const saveDb = async (db: AppDatabase): Promise<void> => {
-  dbCache = db; // update cache immediately so in-flight reads stay consistent
   // Chain writes so they never run in parallel
   writeLock = writeLock
     .catch(() => undefined)
-    .then(() => writeDb(JSON.stringify(db, null, 2)));
+    .then(async () => {
+      const remoteRaw = await readDb();
+      const remoteDb = normalizeDb(remoteRaw ? (JSON.parse(remoteRaw) as Partial<AppDatabase>) : null);
+      const mergedDb = mergeDb(remoteDb, normalizeDb(db));
+      await writeDb(JSON.stringify(mergedDb, null, 2));
+    });
   await writeLock;
 };
