@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from './useAuth';
 import { toast } from 'sonner';
 import { apiFetch, ApiError, getApiUrl } from '@/lib/api';
+import { getBrowserDeviceName } from '@/lib/device-display';
 
 let cachedTransfers: FileTransfer[] = [];
 let cachedTransfersUserId: string | null = null;
@@ -88,7 +89,7 @@ export const useFileTransfer = () => {
       const data = await apiFetch<{ id: string }>('/api/devices', {
         method: 'POST',
         body: JSON.stringify({
-          deviceName: `${navigator.platform || 'Browser'} Browser`,
+          deviceName: getBrowserDeviceName(),
           deviceType: 'browser',
           platform: 'browser',
           deviceId,
@@ -122,7 +123,7 @@ export const useFileTransfer = () => {
     }>('/api/devices', {
       method: 'POST',
       body: JSON.stringify({
-        deviceName: `${navigator.platform} Browser`,
+        deviceName: getBrowserDeviceName(),
         deviceType: 'browser',
         platform: 'browser',
         deviceId: browserDeviceId,
@@ -665,15 +666,21 @@ export const useFileTransfer = () => {
 
     try {
       const data = await apiFetch<{ signedUrl: string; fileName: string }>(`/api/file-transfers/${transferId}/download-link`);
+      const response = await fetch(data.signedUrl);
+      if (!response.ok) {
+        throw new Error('Failed to fetch download payload');
+      }
+
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.style.display = 'none';
-      a.href = data.signedUrl;
-      a.target = '_blank';
-      a.rel = 'noopener';
+      a.href = objectUrl;
       a.download = data.fileName || fileName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
 
       toast.success('File download started');
     } catch (err) {

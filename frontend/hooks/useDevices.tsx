@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useAuth } from './useAuth';
 import { toast } from 'sonner';
 import { apiFetch } from '@/lib/api';
+import { getBrowserDeviceName } from '@/lib/device-display';
 
 let cachedDevices: Device[] = [];
 let cachedCurrentDevice: Device | null = null;
@@ -41,7 +42,7 @@ export const useDevices = () => {
   const registerDevice = async () => {
     if (!user) return null;
     const deviceId = getOrCreateDeviceId();
-    const deviceName = `${navigator.platform} Browser`;
+    const deviceName = getBrowserDeviceName();
     try {
       const data = await apiFetch<Device>('/api/devices', {
         method: 'POST',

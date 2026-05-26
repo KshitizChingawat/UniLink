@@ -5,6 +5,7 @@ import { useDevices } from '@/hooks/useDevices';
 import { useClipboard } from '@/hooks/useClipboard';
 import { useFileTransfer } from '@/hooks/useFileTransfer';
 import { useLocation } from 'wouter';
+import { getReadableDeviceName, getReadablePlatformName } from '@/lib/device-display';
 
 const DashboardHome = () => {
   const [, navigate] = useLocation();
@@ -118,10 +119,10 @@ const DashboardHome = () => {
                 {activeDevices.slice(0, 3).map((device) => (
                   <div key={device.id} className="flex items-center justify-between p-2 border rounded-lg">
                     <div className="flex items-center space-x-3">
-                      {getDeviceIcon(device.deviceType)}
+                        {getDeviceIcon(device.deviceType)}
                       <div>
-                        <p className="font-medium">{device.deviceName}</p>
-                        <p className="text-sm text-gray-500">{device.platform}</p>
+                        <p className="font-medium">{getReadableDeviceName(device)}</p>
+                        <p className="text-sm text-gray-500">{getReadablePlatformName(device)}</p>
                       </div>
                     </div>
                     <div className="flex items-center space-x-2">

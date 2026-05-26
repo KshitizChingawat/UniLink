@@ -12,6 +12,7 @@ import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useAuth } from '@/hooks/useAuth';
 import { apiFetch } from '@/lib/api';
+import { getReadableDeviceName } from '@/lib/device-display';
 
 const FileTransferPage = () => {
   const { user } = useAuth();
@@ -23,7 +24,9 @@ const FileTransferPage = () => {
   const [previewTransferId, setPreviewTransferId] = useState('');
   const [previewType, setPreviewType] = useState('');
   const [miniPlayerOpen, setMiniPlayerOpen] = useState(false);
+  const [showAllTransfers, setShowAllTransfers] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const collapsedTransferCount = 4;
   const proActive = user?.plan === 'pro' && (!user.subscriptionExpiresAt || new Date(user.subscriptionExpiresAt).getTime() > Date.now());
   const uploadLimit = proActive ? 10 * 1024 * 1024 * 1024 : 100 * 1024 * 1024;
   const uploadLimitLabel = proActive ? '10 GB' : '100 MB';
@@ -233,6 +236,8 @@ const FileTransferPage = () => {
     return null;
   };
 
+  const visibleTransfers = showAllTransfers ? transfers : transfers.slice(0, collapsedTransferCount);
+
   return (
     <div className="space-y-6">
       <div>
@@ -303,7 +308,7 @@ const FileTransferPage = () => {
                 <SelectItem value="all">All connected devices</SelectItem>
                 {devices.map((device) => (
                   <SelectItem key={device.id} value={device.id}>
-                    {device.deviceName} ({device.deviceType})
+                    {getReadableDeviceName(device)} ({device.deviceType})
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -370,7 +375,7 @@ const FileTransferPage = () => {
             </div>
           ) : (
             <div className="space-y-4">
-              {transfers.map((transfer) => (
+              {visibleTransfers.map((transfer) => (
                 <div key={transfer.id} className="rounded-xl border p-4 shadow-sm transition-colors hover:bg-slate-50/70">
                   <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                     <div className="flex min-w-0 items-start gap-3">
@@ -446,6 +451,17 @@ const FileTransferPage = () => {
                   )}
                 </div>
               ))}
+              {transfers.length > collapsedTransferCount ? (
+                <div className="flex justify-center pt-2">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => setShowAllTransfers((current) => !current)}
+                  >
+                    {showAllTransfers ? 'Show less' : `Show more (${transfers.length - collapsedTransferCount} more)`}
+                  </Button>
+                </div>
+              ) : null}
             </div>
           )}
         </CardContent>
