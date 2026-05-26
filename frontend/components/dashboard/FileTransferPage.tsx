@@ -4,14 +4,14 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Upload, Download, Send, X, FileText, Image, Video, Archive, Play, Crown, Trash2 } from 'lucide-react';
+import { Upload, Download, Send, X, FileText, Image, Video, Archive, Play, Crown, Trash2, Eye } from 'lucide-react';
 import { useFileTransfer } from '@/hooks/useFileTransfer';
 import { useDevices } from '@/hooks/useDevices';
 import { useDropzone } from 'react-dropzone';
 import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useAuth } from '@/hooks/useAuth';
-import { BASE_URL } from '@/lib/api';
+import { apiFetch } from '@/lib/api';
 
 const FileTransferPage = () => {
   const { user } = useAuth();
@@ -21,19 +21,27 @@ const FileTransferPage = () => {
   const [previewUrl, setPreviewUrl] = useState('');
   const [previewName, setPreviewName] = useState('');
   const [previewTransferId, setPreviewTransferId] = useState('');
+  const [previewType, setPreviewType] = useState('');
   const [miniPlayerOpen, setMiniPlayerOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const proActive = user?.plan === 'pro' && (!user.subscriptionExpiresAt || new Date(user.subscriptionExpiresAt).getTime() > Date.now());
   const uploadLimit = proActive ? 10 * 1024 * 1024 * 1024 : 100 * 1024 * 1024;
   const uploadLimitLabel = proActive ? '10 GB' : '100 MB';
-  const upgradeLimitMessage = proActive
+  const maxFilesPerSelection = 10;
+  const uploadLimitMessage = proActive
     ? `Your Pro plan supports files up to ${uploadLimitLabel}.`
-    : "This file can't be uploaded under the Free plan. Upgrade to Pro to share files up to 10 GB.";
+    : "Free plan supports files up to 100 MB per file. Upgrade to Pro to share files up to 10 GB.";
+  const sanitizeDisplayName = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f<>`"']/g, '').trim() || 'file';
 
   const onDrop = async (acceptedFiles: File[]) => {
+    if (acceptedFiles.length > maxFilesPerSelection) {
+      toast.error(`You can upload up to ${maxFilesPerSelection} files at a time.`);
+      return;
+    }
+
     for (const file of acceptedFiles) {
       if (file.size > uploadLimit) {
-        toast.error(upgradeLimitMessage);
+        toast.error(uploadLimitMessage);
         continue;
       }
       const targetDevice = selectedDevice === 'all' ? undefined : selectedDevice;
@@ -45,6 +53,7 @@ const FileTransferPage = () => {
     onDrop,
     multiple: true,
     maxSize: uploadLimit,
+    maxFiles: maxFilesPerSelection,
     noClick: true,
     noKeyboard: true,
   });
@@ -62,9 +71,15 @@ const FileTransferPage = () => {
       return;
     }
 
+    if (files.length > maxFilesPerSelection) {
+      toast.error(`You can upload up to ${maxFilesPerSelection} files at a time.`);
+      event.target.value = '';
+      return;
+    }
+
     for (const file of files) {
       if (file.size > uploadLimit) {
-        toast.error(upgradeLimitMessage);
+        toast.error(uploadLimitMessage);
         continue;
       }
       const targetDevice = selectedDevice === 'all' ? undefined : selectedDevice;
@@ -140,37 +155,31 @@ const FileTransferPage = () => {
   };
 
   const isVideoTransfer = (transfer: any) => String(getTransferField(transfer, 'fileType') || '').startsWith('video/');
+  const isPreviewableType = (fileType: string) =>
+    fileType.startsWith('image/') ||
+    fileType.startsWith('video/') ||
+    fileType.startsWith('audio/') ||
+    fileType === 'application/pdf';
 
-  const previewVideo = async (transfer: any) => {
+  const openPreview = async (transfer: any) => {
     try {
-      const token = localStorage.getItem('auth_token');
-      const response = await fetch(`${BASE_URL}/api/file-transfers/${transfer.id}/download`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-
-      if (!response.ok) {
-        toast.error('Failed to load video preview.');
-        return;
-      }
-
-      const blob = await response.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      setPreviewUrl(objectUrl);
-      setPreviewName(getTransferField(transfer, 'fileName') || 'Video preview');
+      const fileType = String(getTransferField(transfer, 'fileType') || '');
+      const preview = await apiFetch<{ signedUrl: string; fileName: string }>(`/api/file-transfers/${transfer.id}/download-link`);
+      setPreviewUrl(preview.signedUrl);
+      setPreviewName(getTransferField(transfer, 'fileName') || preview.fileName || 'Preview');
       setPreviewTransferId(transfer.id);
+      setPreviewType(fileType);
       setMiniPlayerOpen(false);
     } catch (error) {
-      toast.error('Failed to load video preview.');
+      toast.error('Failed to load preview.');
     }
   };
 
   const closePreview = () => {
-    if (previewUrl) {
-      URL.revokeObjectURL(previewUrl);
-    }
     setPreviewUrl('');
     setPreviewName('');
     setPreviewTransferId('');
+    setPreviewType('');
     setMiniPlayerOpen(false);
   };
 
@@ -179,13 +188,49 @@ const FileTransferPage = () => {
   };
 
   const closeMiniPlayer = () => {
-    if (previewUrl) {
-      URL.revokeObjectURL(previewUrl);
-    }
     setPreviewUrl('');
     setPreviewName('');
     setPreviewTransferId('');
+    setPreviewType('');
     setMiniPlayerOpen(false);
+  };
+
+  const renderPreviewContent = () => {
+    if (!previewUrl) return null;
+
+    if (previewType.startsWith('image/')) {
+      return (
+        <div className="overflow-hidden rounded-xl bg-slate-950/5 p-2">
+          <img src={previewUrl} alt={previewName || 'Preview'} className="max-h-[68vh] w-full rounded-lg object-contain" />
+        </div>
+      );
+    }
+
+    if (previewType.startsWith('video/')) {
+      return (
+        <div className="overflow-hidden rounded-xl bg-black">
+          <video controls className="max-h-[68vh] w-full object-contain" src={previewUrl} />
+        </div>
+      );
+    }
+
+    if (previewType.startsWith('audio/')) {
+      return (
+        <div className="rounded-xl border border-slate-200 bg-white p-6">
+          <audio controls className="w-full" src={previewUrl} />
+        </div>
+      );
+    }
+
+    if (previewType === 'application/pdf') {
+      return (
+        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+          <iframe title={previewName || 'PDF preview'} src={previewUrl} className="h-[68vh] w-full" />
+        </div>
+      );
+    }
+
+    return null;
   };
 
   return (
@@ -225,9 +270,9 @@ const FileTransferPage = () => {
                 const activeName = activeTransfer ? getTransferField(activeTransfer, 'fileName') : uploadId;
                 return (
                   <div key={uploadId} className="space-y-2">
-                    <div className="flex items-center justify-between gap-3 text-sm">
-                      <span className="truncate font-medium text-gray-900">{activeName}</span>
-                      <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+                      <span className="min-w-0 flex-1 break-words font-medium text-gray-900">{sanitizeDisplayName(String(activeName))}</span>
+                      <div className="flex shrink-0 items-center gap-2">
                         <span className="text-gray-600">{percent}%</span>
                         <Button
                           size="sm"
@@ -286,7 +331,7 @@ const FileTransferPage = () => {
               </p>
             )}
             <p className="text-sm text-gray-500 mb-4">
-              Support for all file types up to {uploadLimitLabel}
+              Support for approved file types, up to {uploadLimitLabel} each, {maxFilesPerSelection} files at a time
             </p>
             <Button
               type="button"
@@ -326,28 +371,30 @@ const FileTransferPage = () => {
           ) : (
             <div className="space-y-4">
               {transfers.map((transfer) => (
-                <div key={transfer.id} className="border rounded-lg p-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center space-x-3">
+                <div key={transfer.id} className="rounded-xl border p-4 shadow-sm transition-colors hover:bg-slate-50/70">
+                  <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="flex min-w-0 items-start gap-3">
                       {getFileIcon(getTransferField(transfer, 'fileType'))}
-                      <div>
-                        <p className="font-medium">{getTransferField(transfer, 'fileName')}</p>
+                      <div className="min-w-0">
+                        <p className="break-words font-medium leading-snug">{sanitizeDisplayName(String(getTransferField(transfer, 'fileName') || 'file'))}</p>
                         <p className="text-sm text-gray-500">
                           {formatFileSize(getTransferField(transfer, 'fileSize') || 0)}
                         </p>
                       </div>
                     </div>
-                    <div className="flex items-center space-x-2">
-                      <Badge className={getStatusColor(getTransferField(transfer, 'transferStatus') || 'pending')}>
+                    <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+                      <Badge className={`shrink-0 ${getStatusColor(getTransferField(transfer, 'transferStatus') || 'pending')}`}>
                         {(getTransferField(transfer, 'transferStatus') || 'pending').replace('_', ' ')}
                       </Badge>
-                      {getTransferField(transfer, 'transferStatus') === 'completed' && isVideoTransfer(transfer) && (
+                      {getTransferField(transfer, 'transferStatus') === 'completed' && isPreviewableType(String(getTransferField(transfer, 'fileType') || '')) && (
                         <Button
                           size="sm"
                           variant="outline"
-                          onClick={() => previewVideo(transfer)}
+                          type="button"
+                          onClick={() => openPreview(transfer)}
                         >
-                          <Play className="w-4 h-4" />
+                          {isVideoTransfer(transfer) ? <Play className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                          <span className="ml-2">Preview</span>
                         </Button>
                       )}
                       {getTransferField(transfer, 'transferStatus') === 'completed' && (
@@ -374,7 +421,7 @@ const FileTransferPage = () => {
                   {/* Progress Bar */}
                   <div className="space-y-2">
                     <Progress value={getTransferProgress(transfer)} className="h-2" />
-                    <div className="flex justify-between text-xs text-gray-500">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500">
                       <span>
                         {isVideoTransfer(transfer) ? 'video transfer' : `${getTransferField(transfer, 'transferMethod') || 'cloud'} transfer`}
                       </span>
@@ -385,7 +432,7 @@ const FileTransferPage = () => {
                   </div>
 
                   {getTransferField(transfer, 'transferStatus') !== 'in_progress' && (
-                    <div className="mt-3 flex justify-end">
+                    <div className="mt-3 flex justify-start sm:justify-end">
                       <Button
                         size="sm"
                         variant="ghost"
@@ -411,20 +458,20 @@ const FileTransferPage = () => {
           <CardDescription>Common file transfer operations</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Button variant="outline" type="button" className="h-auto p-4 flex flex-col items-center space-y-2" onClick={() => { handleFileSelect('image/*'); toast.info('Choose photos to send.'); }}>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <Button variant="outline" type="button" className="h-auto min-h-24 p-4 flex flex-col items-center justify-center space-y-2" onClick={() => { handleFileSelect('image/*'); toast.info('Choose photos to send.'); }}>
               <Image className="w-8 h-8" />
               <span>Send Photos</span>
             </Button>
-            <Button variant="outline" type="button" className="h-auto p-4 flex flex-col items-center space-y-2" onClick={() => { handleFileSelect('video/*'); toast.info('Choose a video to send.'); }}>
+            <Button variant="outline" type="button" className="h-auto min-h-24 p-4 flex flex-col items-center justify-center space-y-2" onClick={() => { handleFileSelect('video/*'); toast.info('Choose a video to send.'); }}>
               <Video className="w-8 h-8" />
               <span>Send Videos</span>
             </Button>
-            <Button variant="outline" type="button" className="h-auto p-4 flex flex-col items-center space-y-2" onClick={() => { handleFileSelect('.pdf,.doc,.docx,.txt'); toast.info('Choose documents to send.'); }}>
+            <Button variant="outline" type="button" className="h-auto min-h-24 p-4 flex flex-col items-center justify-center space-y-2" onClick={() => { handleFileSelect('.pdf,.doc,.docx,.txt'); toast.info('Choose documents to send.'); }}>
               <FileText className="w-8 h-8" />
               <span>Send Documents</span>
             </Button>
-            <Button variant="outline" type="button" className="h-auto p-4 flex flex-col items-center space-y-2 md:col-span-3" onClick={() => { handleFileSelect('.zip,.rar,.7z,.tar'); toast.info('Choose an archive to send.'); }}>
+            <Button variant="outline" type="button" className="h-auto min-h-24 p-4 flex flex-col items-center justify-center space-y-2" onClick={() => { handleFileSelect('.zip,.rar,.7z,.tar'); toast.info('Choose an archive to send.'); }}>
               <Archive className="w-8 h-8" />
               <span>Send Archive</span>
             </Button>
@@ -435,17 +482,17 @@ const FileTransferPage = () => {
       <Dialog open={Boolean(previewUrl) && !miniPlayerOpen} onOpenChange={(open) => { if (!open) closePreview(); }}>
         <DialogContent className="max-h-[88vh] max-w-5xl overflow-hidden">
           <DialogHeader>
-            <DialogTitle>{previewName || 'Video preview'}</DialogTitle>
+            <DialogTitle>{previewName || 'File preview'}</DialogTitle>
           </DialogHeader>
           {previewUrl ? (
             <div className="space-y-4">
-              <div className="overflow-hidden rounded-xl bg-black">
-                <video controls className="max-h-[68vh] w-full object-contain" src={previewUrl} />
-              </div>
+              {renderPreviewContent()}
               <div className="flex justify-end gap-2">
-                <Button type="button" variant="outline" onClick={openMiniPlayer}>
-                  Miniplayer
-                </Button>
+                {previewType.startsWith('video/') ? (
+                  <Button type="button" variant="outline" onClick={openMiniPlayer}>
+                    Miniplayer
+                  </Button>
+                ) : null}
                 <Button type="button" variant="outline" onClick={() => previewTransferId && downloadFile(previewTransferId, previewName || 'video')} disabled={!previewTransferId}>
                   <Download className="mr-2 h-4 w-4" />
                   Download
@@ -465,7 +512,7 @@ const FileTransferPage = () => {
             </div>
             <div className="flex items-center gap-2">
               <Button type="button" size="sm" variant="ghost" className="text-white hover:bg-slate-800 hover:text-white" onClick={() => setMiniPlayerOpen(false)}>
-                Open
+                Open full
               </Button>
               <Button type="button" size="sm" variant="ghost" className="text-white hover:bg-slate-800 hover:text-white" onClick={closeMiniPlayer}>
                 <X className="h-4 w-4" />
