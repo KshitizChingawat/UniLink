@@ -121,27 +121,27 @@ const Login = () => {
   };
 
   return (
-    <div className="relative flex h-[100svh] items-start justify-center overflow-hidden bg-gradient-to-br from-unilink-600 via-blue-600 to-purple-600 px-3 py-2 sm:items-center sm:px-4 sm:py-4">
+    <div className="relative flex min-h-[100dvh] items-center justify-center overflow-hidden bg-gradient-to-br from-unilink-600 via-blue-600 to-purple-600 px-3 py-4 sm:px-4 sm:py-5">
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
         <div className="absolute left-[8%] top-[12%] h-40 w-40 rounded-full bg-white/10 blur-2xl animate-float" />
         <div className="absolute right-[10%] top-[20%] h-56 w-56 rounded-full bg-cyan-300/20 blur-3xl animate-pulse-glow" />
         <div className="absolute bottom-[12%] left-[16%] h-48 w-48 rounded-full bg-indigo-200/20 blur-3xl animate-float" style={{ animationDelay: '1.4s' }} />
         <div className="absolute bottom-[8%] right-[14%] h-44 w-44 rounded-full bg-white/10 blur-2xl animate-pulse-glow" style={{ animationDelay: '2.1s' }} />
       </div>
-      <div className="flex w-full max-w-[27rem] items-center justify-center">
+      <div className="flex w-full max-w-[26.5rem] items-center justify-center">
         {/* Login Card */}
-        <div className="relative flex max-h-[calc(100svh-1rem)] w-full flex-col justify-center rounded-2xl border border-white/40 bg-white/95 px-5 py-4 shadow-2xl backdrop-blur-sm sm:max-h-[calc(100svh-2rem)] sm:px-7 sm:py-6">
+        <div className="relative flex w-full flex-col justify-center rounded-2xl border border-white/40 bg-white/95 px-5 py-4 shadow-2xl backdrop-blur-sm sm:px-6 sm:py-5">
           {/* Logo */}
-          <div className="mb-4 text-center sm:mb-6">
-            <div className="mb-2.5 flex justify-center sm:mb-3">
-              <Logo size="lg" showText={false} />
+          <div className="mb-3.5 text-center sm:mb-5">
+            <div className="mb-2 flex justify-center sm:mb-2.5">
+              <Logo size="md" showText={false} />
             </div>
             
-            <h1 className="text-[1.55rem] font-bold leading-tight text-gray-900 sm:text-2xl">Welcome back</h1>
-            <p className="mt-1 text-sm text-gray-600 sm:mt-1.5 sm:text-base">Sign in to your UniLink account</p>
+            <h1 className="text-[1.45rem] font-bold leading-tight text-gray-900 sm:text-[1.9rem]">Welcome back</h1>
+            <p className="mt-1 text-sm text-gray-600 sm:mt-1.5 sm:text-[15px]">Sign in to your UniLink account</p>
           </div>
 
-          <form onSubmit={handleSubmit} className="space-y-3.5 sm:space-y-5">
+          <form onSubmit={handleSubmit} className="space-y-3 sm:space-y-4">
             <div>
               <Label htmlFor="email">Email address</Label>
               <Input
@@ -223,7 +223,7 @@ const Login = () => {
               </button>
             </div>
 
-            <div className="rounded-2xl border border-blue-100 bg-blue-50/40 px-3 py-3.5 sm:px-4 sm:py-4">
+            <div className="rounded-2xl border border-blue-100 bg-blue-50/40 px-3 py-3 sm:px-4 sm:py-3.5">
               <AnimatedToggle
                 canActivate={Boolean(email.trim() && password.trim())}
                 isSubmitting={loading}
@@ -231,12 +231,12 @@ const Login = () => {
                 readyLabel="Tap the left module to sign in"
                 successLabel="UniLink connected. Logging you in..."
                 onActivate={performLogin}
-                className="gap-2.5 scale-[0.94] sm:gap-3 sm:scale-100"
+                className="gap-2 scale-[0.86] sm:gap-2.5 sm:scale-[0.94]"
               />
             </div>
           </form>
 
-          <div className="mt-4 text-center sm:mt-5">
+          <div className="mt-3.5 text-center sm:mt-4">
             <p className="text-sm text-gray-600 sm:text-base">
               Don't have an account?{' '}
               <Link to="/register" className="text-unilink-600 hover:text-unilink-700 font-semibold">
@@ -246,7 +246,7 @@ const Login = () => {
           </div>
 
           {/* Social Login */}
-          <div className="mt-4 sm:mt-5">
+          <div className="mt-3.5 sm:mt-4">
             <div className="relative">
               <div className="absolute inset-0 flex items-center">
                 <div className="w-full border-t border-gray-300" />
@@ -256,7 +256,7 @@ const Login = () => {
               </div>
             </div>
 
-            <div className="mt-3.5 grid grid-cols-2 gap-2.5 sm:mt-4 sm:gap-3">
+            <div className="mt-3 grid grid-cols-2 gap-2.5 sm:mt-3.5 sm:gap-3">
               <Button variant="outline" type="button" className="h-9 w-full text-sm sm:h-10" onClick={handleGoogleLogin} disabled={loading}>
                 <svg className="w-4 h-4 mr-2" viewBox="0 0 24 24">
                   <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>

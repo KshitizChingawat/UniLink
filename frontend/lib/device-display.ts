@@ -4,6 +4,8 @@ export interface DeviceLike {
   platform?: string;
 }
 
+const genericBrowserNames = new Set(["browser", "chrome", "edge", "firefox", "safari", "opera"]);
+
 const normalizePlatform = (platform: string) => {
   const value = platform.trim();
 
@@ -63,6 +65,16 @@ export const getBrowserDeviceName = () => {
   }
 
   return `${browserName} on ${modelName}`;
+};
+
+export const isGenericDeviceName = (value: string) => {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return true;
+  if (genericBrowserNames.has(normalized)) return true;
+  if (/^browser on [a-z0-9 _-]+$/i.test(value)) return true;
+  if (/^(chrome|edge|firefox|safari|opera) on [a-z0-9 _-]+$/i.test(value)) return true;
+  if (/^[a-z0-9 _-]+ browser$/i.test(value)) return true;
+  return false;
 };
 
 export const getReadableDeviceName = (device: DeviceLike) => {

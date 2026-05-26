@@ -178,7 +178,7 @@ export const useClipboard = () => {
       fetchClipboardHistory().catch(() => undefined);
     };
 
-    const interval = window.setInterval(refreshClipboard, 3000);
+    const interval = window.setInterval(refreshClipboard, 1500);
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
         refreshClipboard();

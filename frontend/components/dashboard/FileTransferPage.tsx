@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Upload, Download, Send, X, FileText, Image, Video, Archive, Play, Crown, Trash2, Eye } from 'lucide-react';
+import { Upload, Download, Send, X, FileText, Image, Video, Archive, Play, Crown, Trash2, Eye, ChevronDown, ChevronUp } from 'lucide-react';
 import { useFileTransfer } from '@/hooks/useFileTransfer';
 import { useDevices } from '@/hooks/useDevices';
 import { useDropzone } from 'react-dropzone';
@@ -455,10 +455,21 @@ const FileTransferPage = () => {
                 <div className="flex justify-center pt-2">
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant="outline"
+                    className="group rounded-full border-unilink-200 bg-gradient-to-r from-unilink-50 via-white to-violet-50 px-5 py-2 text-unilink-700 shadow-sm transition-all hover:-translate-y-0.5 hover:border-unilink-300 hover:shadow-md"
                     onClick={() => setShowAllTransfers((current) => !current)}
                   >
-                    {showAllTransfers ? 'Show less' : `Show more (${transfers.length - collapsedTransferCount} more)`}
+                    <span className="mr-3 inline-flex h-7 min-w-7 items-center justify-center rounded-full bg-unilink-600 px-2 text-xs font-semibold text-white shadow-sm">
+                      {showAllTransfers ? visibleTransfers.length : transfers.length - collapsedTransferCount}
+                    </span>
+                    <span className="font-medium">
+                      {showAllTransfers ? 'Show less' : 'Show more transfers'}
+                    </span>
+                    {showAllTransfers ? (
+                      <ChevronUp className="ml-2 h-4 w-4 transition-transform group-hover:-translate-y-0.5" />
+                    ) : (
+                      <ChevronDown className="ml-2 h-4 w-4 transition-transform group-hover:translate-y-0.5" />
+                    )}
                   </Button>
                 </div>
               ) : null}

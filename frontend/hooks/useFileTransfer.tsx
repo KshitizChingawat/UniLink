@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from './useAuth';
 import { toast } from 'sonner';
 import { apiFetch, ApiError, getApiUrl } from '@/lib/api';
-import { getBrowserDeviceName } from '@/lib/device-display';
+import { getBrowserDeviceName, isGenericDeviceName } from '@/lib/device-display';
 
 let cachedTransfers: FileTransfer[] = [];
 let cachedTransfersUserId: string | null = null;
@@ -86,10 +86,14 @@ export const useFileTransfer = () => {
         deviceId = `browser_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
         localStorage.setItem('unilink_device_id', deviceId);
       }
+      const storedDevice = getStoredCurrentDevice();
       const data = await apiFetch<{ id: string }>('/api/devices', {
         method: 'POST',
         body: JSON.stringify({
-          deviceName: getBrowserDeviceName(),
+          deviceName:
+            storedDevice?.deviceName && !isGenericDeviceName(storedDevice.deviceName)
+              ? storedDevice.deviceName
+              : getBrowserDeviceName(),
           deviceType: 'browser',
           platform: 'browser',
           deviceId,
@@ -113,6 +117,7 @@ export const useFileTransfer = () => {
       localStorage.getItem('unilink_device_id') ||
       `browser_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     localStorage.setItem('unilink_device_id', browserDeviceId);
+    const storedDevice = getStoredCurrentDevice();
 
     const registeredDevice = await apiFetch<{
       id: string;
@@ -123,7 +128,10 @@ export const useFileTransfer = () => {
     }>('/api/devices', {
       method: 'POST',
       body: JSON.stringify({
-        deviceName: getBrowserDeviceName(),
+        deviceName:
+          storedDevice?.deviceName && !isGenericDeviceName(storedDevice.deviceName)
+            ? storedDevice.deviceName
+            : getBrowserDeviceName(),
         deviceType: 'browser',
         platform: 'browser',
         deviceId: browserDeviceId,
@@ -338,6 +346,18 @@ export const useFileTransfer = () => {
     }
 
     return null;
+  };
+
+  const getStoredCurrentDevice = () => {
+    if (typeof window === 'undefined') return null;
+    const saved = localStorage.getItem('unilink_current_device');
+    if (!saved) return null;
+    try {
+      return JSON.parse(saved) as { id?: string; deviceName?: string } | null;
+    } catch {
+      localStorage.removeItem('unilink_current_device');
+      return null;
+    }
   };
 
   const getTransferFieldValue = <T = unknown,>(transfer: Record<string, unknown>, ...keys: string[]) => {
@@ -748,14 +768,19 @@ export const useFileTransfer = () => {
       fetchTransfers().catch(() => undefined);
     };
 
-    const interval = window.setInterval(refreshTransfers, 2000);
+    const interval = window.setInterval(refreshTransfers, 1500);
     window.addEventListener('focus', refreshTransfers);
-    document.addEventListener('visibilitychange', refreshTransfers);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshTransfers();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       window.clearInterval(interval);
       window.removeEventListener('focus', refreshTransfers);
-      document.removeEventListener('visibilitychange', refreshTransfers);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [user, fetchTransfers]);
 

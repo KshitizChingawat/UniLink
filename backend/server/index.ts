@@ -1414,8 +1414,20 @@ app.post("/api/devices", requireAuth, requireCsrf, async (req: AuthenticatedRequ
     (device) => device.userId === req.auth!.userId && device.deviceId === parsed.data.deviceId,
   );
 
+  const isGenericDeviceName = (value: string) =>
+    /^(browser|chrome|edge|firefox|safari|opera)$/i.test(value.trim()) ||
+    /^browser on [a-z0-9 _-]+$/i.test(value.trim()) ||
+    /^(chrome|edge|firefox|safari|opera) on [a-z0-9 _-]+$/i.test(value.trim()) ||
+    /^[a-z0-9 _-]+ browser$/i.test(value.trim());
+
   if (existing) {
-    existing.deviceName = parsed.data.deviceName;
+    const incomingName = parsed.data.deviceName.trim();
+    const shouldPreserveExistingName =
+      existing.deviceName.trim() &&
+      !isGenericDeviceName(existing.deviceName) &&
+      isGenericDeviceName(incomingName);
+
+    existing.deviceName = shouldPreserveExistingName ? existing.deviceName : incomingName;
     existing.deviceType = parsed.data.deviceType;
     existing.platform = parsed.data.platform;
     existing.publicKey = parsed.data.publicKey;

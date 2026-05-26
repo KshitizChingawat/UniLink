@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Input } from '@/components/ui/input';
 import { apiFetch } from '@/lib/api';
 import { useState } from 'react';
+import { getReadableDeviceName, getReadablePlatformName } from '@/lib/device-display';
 
 interface PairSession {
   code: string;
@@ -165,7 +166,7 @@ const DevicesPage = () => {
                     </div>
                     <div>
                       <CardTitle className="flex items-center space-x-2">
-                        <span>{device.deviceName}</span>
+                        <span>{getReadableDeviceName(device)}</span>
                         {device.id === currentDevice?.id && (
                           <Badge variant="secondary" className="bg-unilink-100 text-unilink-800">
                             Current Device
@@ -173,13 +174,13 @@ const DevicesPage = () => {
                         )}
                       </CardTitle>
                       <CardDescription>
-                        {device.deviceType} • {device.platform}
+                        {device.deviceType} • {getReadablePlatformName(device)}
                       </CardDescription>
                     </div>
                   </div>
                   <div className="flex items-center space-x-2">
                     <Badge className={getPlatformBadge(device.platform)}>
-                      {device.platform}
+                      {getReadablePlatformName(device)}
                     </Badge>
                     <div className={`w-3 h-3 rounded-full ${device.isActive ? 'bg-green-500' : 'bg-gray-400'}`}></div>
                   </div>

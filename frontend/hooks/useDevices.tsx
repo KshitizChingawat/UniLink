@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from './useAuth';
 import { toast } from 'sonner';
 import { apiFetch } from '@/lib/api';
-import { getBrowserDeviceName } from '@/lib/device-display';
+import { getBrowserDeviceName, isGenericDeviceName } from '@/lib/device-display';
 
 let cachedDevices: Device[] = [];
 let cachedCurrentDevice: Device | null = null;
@@ -38,11 +38,26 @@ export const useDevices = () => {
     return deviceId;
   };
 
+  const getStoredCurrentDevice = () => {
+    const saved = localStorage.getItem('unilink_current_device');
+    if (!saved) return null;
+    try {
+      return JSON.parse(saved) as Partial<Device>;
+    } catch {
+      localStorage.removeItem('unilink_current_device');
+      return null;
+    }
+  };
+
   // Register current device
   const registerDevice = async () => {
     if (!user) return null;
     const deviceId = getOrCreateDeviceId();
-    const deviceName = getBrowserDeviceName();
+    const storedDevice = getStoredCurrentDevice();
+    const deviceName =
+      storedDevice?.deviceName && !isGenericDeviceName(storedDevice.deviceName)
+        ? storedDevice.deviceName
+        : getBrowserDeviceName();
     try {
       const data = await apiFetch<Device>('/api/devices', {
         method: 'POST',
@@ -64,18 +79,27 @@ export const useDevices = () => {
   };
 
   // Fetch all devices for the user
-  const fetchDevices = async () => {
+  const fetchDevices = useCallback(async () => {
     if (!user) return [];
     try {
       const data = await apiFetch<Device[]>('/api/devices');
       cachedDevices = data || [];
       setDevices(cachedDevices);
+      const currentDeviceId = cachedCurrentDevice?.id || getStoredCurrentDevice()?.id;
+      if (currentDeviceId) {
+        const matchedCurrentDevice = cachedDevices.find((device) => device.id === currentDeviceId) || null;
+        cachedCurrentDevice = matchedCurrentDevice;
+        setCurrentDevice(matchedCurrentDevice);
+        if (matchedCurrentDevice) {
+          localStorage.setItem('unilink_current_device', JSON.stringify(matchedCurrentDevice));
+        }
+      }
       return cachedDevices;
     } catch (err) {
       console.error('Fetch devices error:', err);
       return [];
     }
-  };
+  }, [user]);
 
   // Update device status
   const updateDeviceStatus = async (deviceId: string, isActive: boolean) => {
@@ -130,15 +154,11 @@ export const useDevices = () => {
       const shouldShowLoading = cachedDevicesUserId !== user.id && cachedDevices.length === 0;
       setLoading(shouldShowLoading);
 
-      const cachedDevice = localStorage.getItem('unilink_current_device');
-      if (cachedDevice) {
-        try {
-          const parsedDevice = JSON.parse(cachedDevice);
-          cachedCurrentDevice = parsedDevice;
-          setCurrentDevice(parsedDevice);
-        } catch {
-          localStorage.removeItem('unilink_current_device');
-        }
+      const storedDevice = getStoredCurrentDevice();
+      if (storedDevice) {
+        const parsedDevice = storedDevice as Device;
+        cachedCurrentDevice = parsedDevice;
+        setCurrentDevice(parsedDevice);
       }
 
       const registeredDevice = await registerDevice();
@@ -161,7 +181,31 @@ export const useDevices = () => {
     return () => {
       active = false;
     };
-  }, [user]);
+  }, [user, fetchDevices]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const refreshDevices = () => {
+      fetchDevices().catch(() => undefined);
+    };
+
+    const interval = window.setInterval(refreshDevices, 2000);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshDevices();
+      }
+    };
+
+    window.addEventListener('focus', refreshDevices);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', refreshDevices);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [user, fetchDevices]);
 
   return {
     devices,

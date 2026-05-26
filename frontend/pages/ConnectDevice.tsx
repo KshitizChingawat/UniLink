@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { apiFetch } from "@/lib/api";
 import Logo from "@/components/Logo";
 import { toast } from "sonner";
+import { getBrowserDeviceName } from "@/lib/device-display";
 
 interface PairSessionResponse {
   code: string;
@@ -56,9 +57,7 @@ const getOrCreateDeviceId = () => {
 };
 
 const defaultDeviceName = () => {
-  const platform = detectPlatform();
-  const label = platform === "ios" ? "iPhone Browser" : platform === "android" ? "Android Browser" : `${navigator.platform} Browser`;
-  return label;
+  return getBrowserDeviceName();
 };
 
 const ConnectDevice = () => {
