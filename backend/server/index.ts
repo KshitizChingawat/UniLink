@@ -120,7 +120,7 @@ const MAX_FILES_PER_SELECTION = 10;
 const FREE_FILE_SIZE_LIMIT = MAX_SINGLE_FILE_SIZE;
 const PRO_FILE_SIZE_LIMIT = MAX_SINGLE_FILE_SIZE;
 const MONTH_IN_MS = 30 * 24 * 60 * 60 * 1000;
-const OTP_FALLBACK_ENABLED = !isProduction && appConfig.allowOtpFallback;
+const OTP_FALLBACK_ENABLED = appConfig.allowOtpFallback;
 const DEMO_GOOGLE_LOGIN_ENABLED = !isProduction && appConfig.allowDemoGoogleLogin;
 const strictContentSecurityPolicyDirectives = {
   defaultSrc: ["'self'"],
@@ -412,6 +412,13 @@ const consumeExpiredEmailVerifications = (db: Awaited<ReturnType<typeof loadDb>>
     (entry) => new Date(entry.expiresAt).getTime() > Date.now(),
   );
 };
+
+const registrationOtpFallbackResponse = (message: string, otp: string) => ({
+  success: true,
+  message,
+  developmentOtp: otp,
+  deliveryMode: "fallback" as const,
+});
 
 const refreshUserPlan = (user: UserRecord) => {
   if (user.role === "admin") {
@@ -756,13 +763,6 @@ app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) =>
     return;
   }
 
-  if (!isEmailVerificationConfigured()) {
-    res.status(503).json({
-      error: "Email verification is not configured yet. Add SMTP settings on the server first.",
-    });
-    return;
-  }
-
   try {
     const db = await loadDb();
     consumeExpiredEmailVerifications(db);
@@ -788,6 +788,24 @@ app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) =>
     );
     db.emailVerifications.unshift(verification);
     await saveDb(db);
+
+    if (!isEmailVerificationConfigured()) {
+      if (OTP_FALLBACK_ENABLED) {
+        res.json(
+          registrationOtpFallbackResponse(
+            "Email delivery is not configured right now. Use the temporary OTP shown below to continue signup.",
+            otp,
+          ),
+        );
+        return;
+      }
+
+      res.status(503).json({
+        error: "Email verification is not configured yet. Add SMTP settings on the server first.",
+      });
+      return;
+    }
+
     try {
       await sendRegistrationOtp(email, otp);
 
@@ -797,13 +815,12 @@ app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) =>
       });
       return;
     } catch (mailError) {
-      if (OTP_FALLBACK_ENABLED && isMailtrapDemoRestrictionError(mailError)) {
-        res.json({
-          success: true,
-          message: "Email delivery is in testing mode. Use the temporary OTP shown below.",
-          developmentOtp: otp,
-          deliveryMode: "fallback",
-        });
+      if (OTP_FALLBACK_ENABLED) {
+        const fallbackMessage = isMailtrapDemoRestrictionError(mailError)
+          ? "Email delivery is in testing mode. Use the temporary OTP shown below."
+          : "Email delivery is temporarily unavailable. Use the temporary OTP shown below to continue signup.";
+
+        res.json(registrationOtpFallbackResponse(fallbackMessage, otp));
         return;
       }
 

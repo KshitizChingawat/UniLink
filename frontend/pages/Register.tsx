@@ -127,17 +127,19 @@ const Register = () => {
       return;
     }
 
-    setOtpSent(true);
+    setOtpSent(false);
     setOtpVerified(false);
     setSendingOtp(true);
     const result = await requestRegistrationOtp(formData.email);
     setSendingOtp(false);
     if (result.error) {
+      setOtpSent(false);
       setOtpVerified(false);
       setDevelopmentOtp('');
       setOtpDeliveryMode(null);
       return;
     }
+    setOtpSent(true);
     setDevelopmentOtp(result.developmentOtp || '');
     setOtpDeliveryMode(result.deliveryMode || 'email');
   };
