@@ -4,6 +4,11 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { fileTypeFromBuffer } from "file-type";
 import { randomInt, randomUUID } from "node:crypto";
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdir, readdir, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { Writable } from "node:stream";
 import { z } from "zod";
 import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
 import { isEmailVerificationConfigured, isMailtrapDemoRestrictionError, sendRegistrationOtp } from "./mailer.js";
@@ -1361,7 +1366,7 @@ app.post("/api/pair-sessions/:code/claim", async (req, res) => {
   await saveDb(db);
 
   res.json({
-    token: signToken(user, true),
+    token: signAuthToken(user, true).token,
     user: userResponse(user),
     device,
   });
@@ -1684,7 +1689,7 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
     chunkSize: session.chunkSize,
     totalChunks: session.totalChunks,
     uploadedChunks: [],
-    fileLimit,
+    fileLimit: getUserFileLimit(user),
     message: "Chunk upload session ready.",
   });
 });
@@ -2211,7 +2216,8 @@ app.post("/api/file-transfers", uploadLimiter, requireAuth, requireCsrf, async (
 
 app.patch("/api/file-transfers/:id", syncLimiter, requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const db = await loadDb();
-  const transfer = getOwnedTransfer(db, req.auth!.userId, req.params.id);
+  const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const transfer = getOwnedTransfer(db, req.auth!.userId, transferId);
   if (!transfer) {
     res.status(404).json({ error: "Transfer not found" });
     return;
@@ -2561,7 +2567,8 @@ app.delete("/api/bluetooth-devices/:id", requireAuth, async (req: AuthenticatedR
 
 app.delete("/api/file-transfers/:id", syncLimiter, requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const db = await loadDb();
-  const transfer = getOwnedTransfer(db, req.auth!.userId, req.params.id);
+  const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const transfer = getOwnedTransfer(db, req.auth!.userId, transferId);
   if (transfer?.filePath) {
     // Remove from Supabase Storage (fire-and-forget, do not block the response)
     supabase.storage.from(FILE_BUCKET).remove([ensureRelativeStoragePath(transfer.filePath)]).catch((err: unknown) => {

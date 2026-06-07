@@ -22,7 +22,7 @@ services:
       - key: APP_BASE_URL
         sync: false
       - key: ALLOW_OTP_FALLBACK
-        value: "false"
+        value: "true"
       - key: ALLOW_DEMO_GOOGLE_LOGIN
         value: "false"
       - key: SUPABASE_URL

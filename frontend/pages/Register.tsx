@@ -170,26 +170,26 @@ const Register = () => {
   };
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-unilink-600 via-blue-600 to-purple-600 dark:from-slate-950 dark:via-slate-900 dark:to-slate-800 flex items-center justify-center p-4">
+    <div className="relative flex min-h-[100dvh] justify-center overflow-x-hidden overflow-y-auto bg-gradient-to-br from-unilink-600 via-blue-600 to-purple-600 px-3 py-5 dark:from-slate-950 dark:via-slate-900 dark:to-slate-800 sm:px-4 sm:py-8">
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
         <div className="absolute left-[8%] top-[12%] h-40 w-40 rounded-full bg-white/10 blur-2xl animate-float" />
         <div className="absolute right-[10%] top-[20%] h-56 w-56 rounded-full bg-cyan-300/20 blur-3xl animate-pulse-glow" />
         <div className="absolute bottom-[12%] left-[16%] h-48 w-48 rounded-full bg-indigo-200/20 blur-3xl animate-float" style={{ animationDelay: '1.4s' }} />
         <div className="absolute bottom-[8%] right-[14%] h-44 w-44 rounded-full bg-white/10 blur-2xl animate-pulse-glow" style={{ animationDelay: '2.1s' }} />
       </div>
-      <div className="w-full max-w-md">
+      <div className="relative z-10 flex w-full max-w-md items-start justify-center">
         {/* Register Card */}
-        <div className="relative bg-white/95 dark:bg-slate-900/95 backdrop-blur-sm rounded-2xl shadow-2xl p-8 border border-white/40 dark:border-slate-700">
+        <div className="relative w-full rounded-2xl border border-white/40 bg-white/95 p-5 shadow-2xl backdrop-blur-sm dark:border-slate-700 dark:bg-slate-900/95 sm:p-7">
           {/* Logo */}
-          <div className="text-center mb-8">
-            <div className="flex justify-center mb-4">
-              <Logo size="lg" showText={false} />
+          <div className="mb-5 text-center sm:mb-6">
+            <div className="mb-3 flex justify-center">
+              <Logo size="md" showText={false} />
             </div>
             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Create your account</h1>
-            <p className="text-gray-600 dark:text-slate-300 mt-2">Join thousands of users connecting their devices without range restrictions</p>
+            <p className="mt-1.5 text-sm text-gray-600 dark:text-slate-300">Join UniLink and connect your devices securely.</p>
           </div>
 
-          <form onSubmit={handleSubmit} className="space-y-6">
+          <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-5">
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <Label htmlFor="firstName">First name</Label>
@@ -272,8 +272,8 @@ const Register = () => {
                   </p>
                   {otpDeliveryMode === 'fallback' && developmentOtp && !otpVerified && (
                     <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                      <p className="font-medium">Temporary testing mode</p>
-                      <p className="mt-1">Mail delivery is blocked by the current Mailtrap test domain, so use this temporary OTP:</p>
+                      <p className="font-medium">Temporary verification code</p>
+                      <p className="mt-1">Email delivery is unavailable right now. Use this code to finish creating your account:</p>
                       <div className="mt-2 rounded-md bg-white px-3 py-2 text-base font-bold tracking-[0.35em] text-amber-700">
                         {developmentOtp}
                       </div>
@@ -375,13 +375,13 @@ const Register = () => {
             <Button 
               type="submit" 
               className="w-full bg-unilink-600 hover:bg-unilink-700"
-              disabled={loading || !agreedToTerms || !isPasswordValid || !otpVerified}
+              disabled={loading || sendingOtp || verifyingOtp}
             >
               {loading ? 'Creating Account...' : 'Create Account'}
             </Button>
           </form>
 
-          <div className="mt-6 text-center">
+          <div className="mt-5 text-center">
             <p className="text-gray-600">
               Already have an account?{' '}
               <Link to="/login" className="text-unilink-600 hover:text-unilink-700 font-semibold">
@@ -391,7 +391,7 @@ const Register = () => {
           </div>
 
           {/* Social Registration */}
-          <div className="mt-6">
+          <div className="mt-5">
             <div className="relative">
               <div className="absolute inset-0 flex items-center">
                 <div className="w-full border-t border-gray-300" />
