@@ -7,6 +7,12 @@ import { getBrowserDeviceName, isGenericDeviceName } from '@/lib/device-display'
 let cachedTransfers: FileTransfer[] = [];
 let cachedTransfersUserId: string | null = null;
 const uploadSessionStorageKey = 'unilink_upload_sessions';
+const getCookieValue = (name: string) => {
+  if (typeof document === 'undefined') return null;
+  const parts = document.cookie.split(';').map((part) => part.trim());
+  const target = parts.find((part) => part.startsWith(`${name}=`));
+  return target ? decodeURIComponent(target.slice(name.length + 1)) : null;
+};
 
 export interface FileTransfer {
   id: string;
@@ -40,6 +46,7 @@ export const useFileTransfer = () => {
   const chunkRetryBaseDelayMs = 1_000;
   const processingPollIntervalMs = 2_500;
   const processingPollLimit = 120;
+  const csrfToken = getCookieValue('unilink_csrf');
 
   const getUploadSessionMap = () => {
     if (typeof window === 'undefined') return {} as Record<string, string>;
@@ -257,9 +264,13 @@ export const useFileTransfer = () => {
           await new Promise<void>((resolve, reject) => {
             xhr = new XMLHttpRequest();
             registerActiveUpload(uploadId, xhr);
+            xhr.withCredentials = true;
             xhr.open('POST', getApiUrl('/api/file-transfers/chunk'));
             xhr.timeout = chunkRequestTimeoutMs;
             xhr.setRequestHeader('Authorization', `Bearer ${localStorage.getItem('auth_token')}`);
+            if (csrfToken) {
+              xhr.setRequestHeader('X-CSRF-Token', csrfToken);
+            }
             xhr.setRequestHeader('Content-Type', 'application/octet-stream');
             xhr.setRequestHeader('X-Upload-Id', sessionUploadId);
             xhr.setRequestHeader('X-Chunk-Index', String(chunkIndex));
@@ -533,9 +544,13 @@ export const useFileTransfer = () => {
         data = await new Promise<FileTransfer>((resolve, reject) => {
           const xhr = new XMLHttpRequest();
           registerActiveUpload(uploadId, xhr);
+          xhr.withCredentials = true;
           xhr.open('POST', getApiUrl('/api/file-transfers/upload'));
           xhr.responseType = 'json';
           xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+          if (csrfToken) {
+            xhr.setRequestHeader('X-CSRF-Token', csrfToken);
+          }
           xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
           xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
           xhr.setRequestHeader('X-File-Size', String(file.size));
