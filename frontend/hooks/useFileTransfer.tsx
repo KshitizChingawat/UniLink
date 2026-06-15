@@ -34,11 +34,12 @@ export const useFileTransfer = () => {
   // Route medium and large files through the resumable chunk path so uploads
   // stay responsive on hosted environments instead of waiting on one big relay.
   const chunkSizeThreshold = 8 * 1024 * 1024;
-  const chunkUploadConcurrency = 5;
-  const chunkRetryLimit = 3;
-  const chunkRequestTimeoutMs = 120_000;
+  const chunkUploadConcurrency = 2;
+  const chunkRetryLimit = 5;
+  const chunkRequestTimeoutMs = 10 * 60 * 1000;
+  const chunkRetryBaseDelayMs = 1_000;
   const processingPollIntervalMs = 2_500;
-  const processingPollLimit = 48;
+  const processingPollLimit = 120;
 
   const getUploadSessionMap = () => {
     if (typeof window === 'undefined') return {} as Record<string, string>;
@@ -228,6 +229,7 @@ export const useFileTransfer = () => {
     uploadedChunks: number[] = []
   ) => {
     const uploadedChunkSet = new Set(uploadedChunks);
+    let uploadFailed = false;
     let completedChunkBytes = uploadedChunks.reduce((sum, chunkIndex) => {
       const start = chunkIndex * chunkSize;
       const end = Math.min(file.size, start + chunkSize);
@@ -241,11 +243,15 @@ export const useFileTransfer = () => {
     );
 
     const uploadSingleChunk = async (chunkIndex: number) => {
+      if (uploadFailed) return;
+
       const start = chunkIndex * chunkSize;
       const end = Math.min(file.size, start + chunkSize);
       const chunk = file.slice(start, end);
 
       for (let attempt = 0; attempt < chunkRetryLimit; attempt += 1) {
+        if (uploadFailed) return;
+
         let xhr: XMLHttpRequest | null = null;
         try {
           await new Promise<void>((resolve, reject) => {
@@ -267,7 +273,10 @@ export const useFileTransfer = () => {
 
             xhr.onload = () => {
               if (xhr.status >= 200 && xhr.status < 300) {
-                completedChunkBytes += chunk.size;
+                if (!uploadedChunkSet.has(chunkIndex)) {
+                  uploadedChunkSet.add(chunkIndex);
+                  completedChunkBytes += chunk.size;
+                }
                 delete activeChunkProgress[chunkIndex];
                 updateUploadProgress(uploadId, file.size, completedChunkBytes, activeChunkProgress);
                 resolve();
@@ -297,10 +306,32 @@ export const useFileTransfer = () => {
           return;
         } catch (error) {
           const cancelled = error instanceof Error && /cancelled/i.test(error.message);
-          if (cancelled || attempt === chunkRetryLimit - 1) {
+          const isFinalAttempt = attempt === chunkRetryLimit - 1;
+          if (cancelled || isFinalAttempt) {
+            uploadFailed = true;
+            activeUploadControllers.current[uploadId]?.forEach((controller) => {
+              if (controller !== xhr && controller.readyState !== XMLHttpRequest.DONE) {
+                controller.abort();
+              }
+            });
+            if (cancelled) {
+              throw error;
+            }
+
+            const cause = error instanceof Error ? error.message : 'Unknown upload failure';
+            if (error instanceof ApiError) {
+              throw new ApiError(`Chunk ${chunkIndex + 1}/${totalChunks} failed after ${chunkRetryLimit} attempts. ${cause}`, error.status);
+            }
+            throw new Error(`Chunk ${chunkIndex + 1}/${totalChunks} failed after ${chunkRetryLimit} attempts. ${cause}`);
+          }
+
+          if (error instanceof Error && /exceeded|unsupported|invalid|limit/i.test(error.message)) {
+            uploadFailed = true;
             throw error;
           }
-          await new Promise((resolve) => window.setTimeout(resolve, 800 * (attempt + 1)));
+
+          const retryDelayMs = chunkRetryBaseDelayMs * 2 ** attempt;
+          await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
         } finally {
           delete activeChunkProgress[chunkIndex];
           updateUploadProgress(uploadId, file.size, completedChunkBytes, activeChunkProgress);
@@ -315,7 +346,7 @@ export const useFileTransfer = () => {
 
     let cursor = 0;
     const workers = Array.from({ length: Math.min(chunkUploadConcurrency, missingChunkIndices.length) }, async () => {
-      while (cursor < missingChunkIndices.length) {
+      while (!uploadFailed && cursor < missingChunkIndices.length) {
         const currentIndex = cursor;
         cursor += 1;
         await uploadSingleChunk(missingChunkIndices[currentIndex]);
@@ -597,7 +628,9 @@ export const useFileTransfer = () => {
         ? `${file.name} transfer cancelled`
         : err instanceof ApiError
           ? err.message
-          : 'Failed to start file transfer';
+          : err instanceof Error && err.message
+            ? err.message
+            : 'Failed to start file transfer';
       if (cancelled) {
         toast.info(message);
       } else {

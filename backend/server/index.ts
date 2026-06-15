@@ -343,9 +343,10 @@ interface PendingUploadSession {
 }
 
 const uploadSessions = new Map<string, PendingUploadSession>();
-const LARGE_UPLOAD_CHUNK_BYTES = 12 * 1024 * 1024;
+const LARGE_UPLOAD_CHUNK_BYTES = 50 * 1024 * 1024;
 const UPLOAD_TEMP_ROOT = path.join(os.tmpdir(), "unilink-upload-sessions");
 const UPLOAD_SESSION_STALE_MS = 30 * 60 * 1000;
+const UPLOAD_REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
 const ALLOWED_UPLOAD_MIME_PREFIXES = ["image/", "video/", "audio/", "text/"];
 const ALLOWED_EXACT_MIME_TYPES = new Set([
   "application/pdf",
@@ -1801,14 +1802,30 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
   try {
     await new Promise<void>((resolve, reject) => {
       const output = createWriteStream(chunkPath);
+      let settled = false;
+
+      const rejectOnce = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        output.destroy(error);
+        reject(error);
+      };
 
       req.on("data", (chunk: Buffer) => {
         bytesWritten += chunk.length;
+        if (bytesWritten > expectedChunkSize) {
+          rejectOnce(new Error("Uploaded chunk exceeded the expected size."));
+        }
       });
 
-      req.on("error", reject);
-      output.on("error", reject);
-      output.on("finish", resolve);
+      req.on("aborted", () => rejectOnce(new Error("Upload chunk was interrupted before completion.")));
+      req.on("error", (error) => rejectOnce(error));
+      output.on("error", (error) => rejectOnce(error));
+      output.on("finish", () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      });
       req.pipe(output);
     });
   } catch (error) {
@@ -2681,6 +2698,9 @@ ensureDataDirs()
     server = app.listen(port, () => {
       logger.info({ port }, "UniLink API listening");
     });
+    server.requestTimeout = UPLOAD_REQUEST_TIMEOUT_MS;
+    server.headersTimeout = UPLOAD_REQUEST_TIMEOUT_MS + 60_000;
+    server.keepAliveTimeout = 65_000;
   })
   .catch((error) => {
     logger.fatal({ err: error }, "Failed to initialize storage");
