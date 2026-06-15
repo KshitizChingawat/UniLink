@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from './useAuth';
 import { toast } from 'sonner';
-import { apiFetch, ApiError, getApiUrl } from '@/lib/api';
+import { apiFetch, ApiError, getApiUrl, resolveApiBaseUrl } from '@/lib/api';
 import { getBrowserDeviceName, isGenericDeviceName } from '@/lib/device-display';
 
 let cachedTransfers: FileTransfer[] = [];
@@ -14,7 +14,7 @@ const getCookieValue = (name: string) => {
   return target ? decodeURIComponent(target.slice(name.length + 1)) : null;
 };
 
-export interface FileTransfer {
+export interface FileTransfer extends Record<string, unknown> {
   id: string;
   user_id: string;
   sender_device_id: string;
@@ -234,6 +234,7 @@ export const useFileTransfer = () => {
     totalChunks: number,
     file: File,
     authToken: string,
+    apiBaseUrl: string,
     uploadedChunks: number[] = []
   ) => {
     const uploadedChunkSet = new Set(uploadedChunks);
@@ -266,7 +267,7 @@ export const useFileTransfer = () => {
             xhr = new XMLHttpRequest();
             registerActiveUpload(uploadId, xhr);
             xhr.withCredentials = true;
-            xhr.open('POST', getApiUrl('/api/file-transfers/chunk'));
+            xhr.open('POST', getApiUrl('/api/file-transfers/chunk', apiBaseUrl));
             xhr.timeout = chunkRequestTimeoutMs;
             xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
             if (csrfToken) {
@@ -448,6 +449,7 @@ export const useFileTransfer = () => {
     const token = localStorage.getItem('auth_token');
     if (!token) return;
     let uploadId = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const apiBaseUrl = await resolveApiBaseUrl();
 
     try {
       const currentDeviceId = await ensureCurrentDeviceId();
@@ -517,7 +519,7 @@ export const useFileTransfer = () => {
         rekeyUploadTracking(uploadId, init.transferId);
         uploadId = init.transferId;
         uploadSessionIds.current[uploadId] = sessionUploadId;
-        await uploadLargeFileInChunks(uploadId, sessionUploadId, init.chunkSize, init.totalChunks, file, token, init.uploadedChunks || []);
+        await uploadLargeFileInChunks(uploadId, sessionUploadId, init.chunkSize, init.totalChunks, file, token, apiBaseUrl, init.uploadedChunks || []);
 
         setUploadProgress((current) => ({
           ...current,
@@ -529,13 +531,13 @@ export const useFileTransfer = () => {
           body: JSON.stringify({ uploadId: sessionUploadId }),
         });
         if ('processing' in completionResponse && completionResponse.processing) {
-          const completedTransfer = await pollCompletedTransfer(completionResponse.transferId);
+          const completedTransfer = await pollCompletedTransfer((completionResponse as { transferId: string }).transferId);
           if (!completedTransfer) {
             throw new Error('File processing is taking too long. Please keep the app open while we finish syncing it.');
           }
           data = completedTransfer;
         } else {
-          data = completionResponse;
+          data = completionResponse as FileTransfer;
         }
         const nextStoredSessions = getUploadSessionMap();
         delete nextStoredSessions[fileFingerprint];
@@ -546,7 +548,7 @@ export const useFileTransfer = () => {
           const xhr = new XMLHttpRequest();
           registerActiveUpload(uploadId, xhr);
           xhr.withCredentials = true;
-          xhr.open('POST', getApiUrl('/api/file-transfers/upload'));
+          xhr.open('POST', getApiUrl('/api/file-transfers/upload', apiBaseUrl));
           xhr.responseType = 'json';
           xhr.setRequestHeader('Authorization', `Bearer ${token}`);
           if (csrfToken) {
