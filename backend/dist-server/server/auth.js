@@ -25,7 +25,13 @@ const signJwt = (payload, expiresIn) => {
 export const signToken = (user, rememberMe = false) => signJwt({ sub: user.id, role: user.role || "user", typ: "access" }, rememberMe ? REMEMBER_ME_TOKEN_EXPIRES_IN : ACCESS_TOKEN_EXPIRES_IN).token;
 export const signAuthToken = (user, rememberMe = false) => signJwt({ sub: user.id, role: user.role || "user", typ: "access" }, rememberMe ? REMEMBER_ME_TOKEN_EXPIRES_IN : ACCESS_TOKEN_EXPIRES_IN);
 export const signScopedToken = (payload, tokenKind, expiresIn) => signJwt({ ...payload, typ: tokenKind }, expiresIn);
+const tokenRevocationCache = new Map();
+const CACHE_TTL_MS = 60 * 1000;
 export const revokeToken = async (jti, reason = "manual") => {
+    tokenRevocationCache.set(jti, {
+        value: true,
+        expiresAt: Date.now() + CACHE_TTL_MS * 10,
+    });
     const { error } = await supabase.from(revokedTokenTable).insert({
         jti,
         reason,
@@ -35,15 +41,31 @@ export const revokeToken = async (jti, reason = "manual") => {
     }
 };
 export const isTokenRevoked = async (jti) => {
-    const { data, error } = await supabase
-        .from(revokedTokenTable)
-        .select("jti")
-        .eq("jti", jti)
-        .maybeSingle();
-    if (error) {
-        throw new Error(`Failed to verify token revocation: ${error.message}`);
+    const cached = tokenRevocationCache.get(jti);
+    if (cached && cached.expiresAt > Date.now()) {
+        return cached.value;
     }
-    return Boolean(data?.jti);
+    try {
+        const { data, error } = await supabase
+            .from(revokedTokenTable)
+            .select("jti")
+            .eq("jti", jti)
+            .maybeSingle();
+        if (error) {
+            console.error(`Error verifying token revocation for jti ${jti}:`, error.message);
+            return false;
+        }
+        const revoked = Boolean(data?.jti);
+        tokenRevocationCache.set(jti, {
+            value: revoked,
+            expiresAt: Date.now() + CACHE_TTL_MS,
+        });
+        return revoked;
+    }
+    catch (err) {
+        console.error(`Failed to verify token revocation for jti ${jti}:`, err);
+        return false;
+    }
 };
 export const verifyScopedToken = async (token, tokenKind) => {
     const payload = jwt.verify(token, appConfig.jwtSecret, { issuer, algorithms: ["HS256"] });
@@ -115,6 +137,11 @@ export const clearAuthCookies = (res) => {
 };
 export const requireCsrf = (req, res, next) => {
     if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") {
+        next();
+        return;
+    }
+    const authorization = typeof req.headers.authorization === "string" ? req.headers.authorization : "";
+    if (authorization.startsWith("Bearer ") && authorization.slice(7).trim().length > 0) {
         next();
         return;
     }

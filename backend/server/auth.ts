@@ -61,7 +61,15 @@ export const signScopedToken = (
 ) =>
   signJwt({ ...payload, typ: tokenKind }, expiresIn);
 
+const tokenRevocationCache = new Map<string, { value: boolean; expiresAt: number }>();
+const CACHE_TTL_MS = 60 * 1000;
+
 export const revokeToken = async (jti: string, reason = "manual") => {
+  tokenRevocationCache.set(jti, {
+    value: true,
+    expiresAt: Date.now() + CACHE_TTL_MS * 10,
+  });
+
   const { error } = await supabase.from(revokedTokenTable).insert({
     jti,
     reason,
@@ -73,17 +81,34 @@ export const revokeToken = async (jti: string, reason = "manual") => {
 };
 
 export const isTokenRevoked = async (jti: string) => {
-  const { data, error } = await supabase
-    .from(revokedTokenTable)
-    .select("jti")
-    .eq("jti", jti)
-    .maybeSingle();
-
-  if (error) {
-    throw new Error(`Failed to verify token revocation: ${error.message}`);
+  const cached = tokenRevocationCache.get(jti);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
   }
 
-  return Boolean(data?.jti);
+  try {
+    const { data, error } = await supabase
+      .from(revokedTokenTable)
+      .select("jti")
+      .eq("jti", jti)
+      .maybeSingle();
+
+    if (error) {
+      console.error(`Error verifying token revocation for jti ${jti}:`, error.message);
+      return false;
+    }
+
+    const revoked = Boolean(data?.jti);
+    tokenRevocationCache.set(jti, {
+      value: revoked,
+      expiresAt: Date.now() + CACHE_TTL_MS,
+    });
+
+    return revoked;
+  } catch (err) {
+    console.error(`Failed to verify token revocation for jti ${jti}:`, err);
+    return false;
+  }
 };
 
 export const verifyScopedToken = async (token: string, tokenKind: TokenKind) => {
