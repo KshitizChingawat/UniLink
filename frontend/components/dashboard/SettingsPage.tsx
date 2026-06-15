@@ -102,11 +102,24 @@ const SettingsPage = () => {
   };
 
   const clearAllData = async () => {
+    if (typeof window !== 'undefined') {
+      const confirmed = window.confirm(
+        'Are you sure you want to clear all your data? This will remove your file transfer history, clipboard history, and saved local settings.',
+      );
+
+      if (!confirmed) {
+        return;
+      }
+    }
+
     try {
-      await Promise.all(transfers.map((transfer) => apiFetch(`/api/file-transfers/${transfer.id}`, { method: 'DELETE' })));
+      await Promise.all([
+        ...transfers.map((transfer) => apiFetch(`/api/file-transfers/${transfer.id}`, { method: 'DELETE' })),
+        ...clipboardHistory.map((item) => apiFetch(`/api/clipboard/${item.id}`, { method: 'DELETE' })),
+      ]);
       localStorage.removeItem('unilink_settings');
       localStorage.removeItem('unilink_profile');
-      toast.success('Dashboard, analytics, and file transfer data cleared.');
+      toast.success('Dashboard, file transfer, and clipboard data cleared.');
       window.location.reload();
     } catch (error) {
       toast.error('Failed to clear all data.');

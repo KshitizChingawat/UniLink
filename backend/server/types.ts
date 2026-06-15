@@ -58,6 +58,8 @@ export interface FileTransferRecord {
   createdAt: string;
   completedAt?: string;
   filePath?: string;
+  uploadTokenJti?: string;
+  downloadTokenJti?: string;
 }
 
 export interface VaultRecord {

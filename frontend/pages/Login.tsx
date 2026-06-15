@@ -9,6 +9,7 @@ import { Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import Logo from '@/components/Logo';
 import AnimatedToggle from '@/components/ui/animated-toggle';
+import LoginSignalScene from '@/components/login/LoginSignalScene';
 import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { apiFetch } from '@/lib/api';
@@ -121,24 +122,27 @@ const Login = () => {
   };
 
   return (
-    <div className="relative flex min-h-[100dvh] items-center justify-center overflow-hidden bg-gradient-to-br from-unilink-600 via-blue-600 to-purple-600 px-3 py-4 sm:px-4 sm:py-5">
-      <div className="pointer-events-none absolute inset-0 overflow-hidden">
-        <div className="absolute left-[8%] top-[12%] h-40 w-40 rounded-full bg-white/10 blur-2xl animate-float" />
-        <div className="absolute right-[10%] top-[20%] h-56 w-56 rounded-full bg-cyan-300/20 blur-3xl animate-pulse-glow" />
-        <div className="absolute bottom-[12%] left-[16%] h-48 w-48 rounded-full bg-indigo-200/20 blur-3xl animate-float" style={{ animationDelay: '1.4s' }} />
-        <div className="absolute bottom-[8%] right-[14%] h-44 w-44 rounded-full bg-white/10 blur-2xl animate-pulse-glow" style={{ animationDelay: '2.1s' }} />
+    <div className="relative flex min-h-[100dvh] items-center justify-center overflow-hidden bg-[#06111f] px-3 py-4 font-['Bahnschrift','Segoe_UI',sans-serif] sm:px-4 sm:py-5">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden bg-[radial-gradient(circle_at_50%_42%,rgba(14,165,233,0.34),transparent_32%),linear-gradient(135deg,#071527_0%,#10375c_42%,#16203c_72%,#2c1651_100%)]">
+        <LoginSignalScene />
+        <div className="absolute inset-0 bg-[linear-gradient(115deg,rgba(255,255,255,0.12)_0%,transparent_22%,transparent_68%,rgba(56,189,248,0.16)_100%)]" />
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,transparent_0%,rgba(2,6,23,0.16)_54%,rgba(2,6,23,0.58)_100%)]" />
+        <div className="absolute inset-0 opacity-[0.13] [background-image:linear-gradient(rgba(255,255,255,0.18)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.14)_1px,transparent_1px)] [background-size:48px_48px]" />
       </div>
-      <div className="flex w-full max-w-[26.5rem] items-center justify-center">
+      <div className="relative z-10 flex w-full max-w-[27rem] items-center justify-center">
         {/* Login Card */}
-        <div className="relative flex w-full flex-col justify-center rounded-2xl border border-white/40 bg-white/95 px-5 py-4 shadow-2xl backdrop-blur-sm sm:px-6 sm:py-5">
+        <div className="relative flex w-full flex-col justify-center overflow-hidden rounded-[1.35rem] border border-white/55 bg-white/[0.92] px-5 py-4 shadow-[0_28px_90px_rgba(2,6,23,0.34)] backdrop-blur-2xl sm:px-6 sm:py-5">
+          <div className="pointer-events-none absolute inset-x-6 top-0 h-px bg-gradient-to-r from-transparent via-white to-transparent" />
+          <div className="pointer-events-none absolute -right-24 -top-24 h-48 w-48 rounded-full bg-cyan-200/20 blur-3xl" />
+          <div className="pointer-events-none absolute -bottom-24 left-8 h-44 w-44 rounded-full bg-blue-300/20 blur-3xl" />
           {/* Logo */}
           <div className="mb-3.5 text-center sm:mb-5">
             <div className="mb-2 flex justify-center sm:mb-2.5">
               <Logo size="md" showText={false} />
             </div>
             
-            <h1 className="text-[1.45rem] font-bold leading-tight text-gray-900 sm:text-[1.9rem]">Welcome back</h1>
-            <p className="mt-1 text-sm text-gray-600 sm:mt-1.5 sm:text-[15px]">Sign in to your UniLink account</p>
+            <h1 className="text-[1.55rem] font-black leading-tight text-slate-950 sm:text-[2rem]">Welcome back</h1>
+            <p className="mt-1 text-sm font-medium text-slate-500 sm:mt-1.5 sm:text-[15px]">Sign in to your UniLink account</p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-3 sm:space-y-4">
@@ -154,8 +158,8 @@ const Login = () => {
                   if (rememberedAccounts.some((account) => account.email === e.target.value)) {
                     hydrateRememberedAccount(e.target.value);
                   } else {
-                    setPassword('');
-                    setRememberMe(false);
+                    // setPassword('');
+                    // setRememberMe(false);
                   }
                 }}
                 onFocus={() => {
@@ -223,7 +227,7 @@ const Login = () => {
               </button>
             </div>
 
-            <div className="rounded-2xl border border-blue-100 bg-blue-50/40 px-3 py-3 sm:px-4 sm:py-3.5">
+            <div className="rounded-[1.15rem] border border-cyan-200/70 bg-[linear-gradient(145deg,rgba(239,246,255,0.92),rgba(255,255,255,0.62))] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.88),0_18px_45px_rgba(37,99,235,0.12)] sm:px-4 sm:py-3.5">
               <AnimatedToggle
                 canActivate={Boolean(email.trim() && password.trim())}
                 isSubmitting={loading}
@@ -231,7 +235,7 @@ const Login = () => {
                 readyLabel="Tap the left module to sign in"
                 successLabel="UniLink connected. Logging you in..."
                 onActivate={performLogin}
-                className="gap-2 scale-[0.86] sm:gap-2.5 sm:scale-[0.94]"
+                className="gap-2 scale-[0.9] sm:gap-2.5 sm:scale-[0.97]"
               />
             </div>
           </form>

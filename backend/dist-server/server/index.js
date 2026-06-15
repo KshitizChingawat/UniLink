@@ -2,34 +2,42 @@ import cors from "cors";
 import express from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
-import os from "node:os";
-import path from "node:path";
+import { fileTypeFromBuffer } from "file-type";
+import { randomInt, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, readdir, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { Writable } from "node:stream";
 import { z } from "zod";
 import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
 import { isEmailVerificationConfigured, isMailtrapDemoRestrictionError, sendRegistrationOtp } from "./mailer.js";
-import { comparePassword, hashPassword, requireAuth, sanitizeUser, signToken } from "./auth.js";
+import { clearAuthCookies, comparePassword, createCsrfToken, hashPassword, requireAuth, requireCsrf, revokeToken, sanitizeUser, setAuthCookies, signAuthToken } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
-import { nowIso, sanitizeFilename } from "./helpers.js";
+import { containsNullBytes, ensureRelativeStoragePath, isZipBombCandidate, nowIso, sanitizeFilename, sanitizeMimeType, sanitizeTextInput } from "./helpers.js";
 import { createId, ensureDataDirs, loadDb, saveDb } from "./storage.js";
+import { appConfig } from "./config.js";
+import { createErrorHandler, rejectDisallowedOrigin } from "./http.js";
+import { httpLogger, logger } from "./logger.js";
 const app = express();
-const port = Number(process.env.PORT || 8787);
-const nodeEnv = process.env.NODE_ENV || "development";
-const isProduction = nodeEnv === "production";
-const rawAllowedOrigins = (process.env.ALLOWED_ORIGINS || "")
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean);
-const allowedOrigins = rawAllowedOrigins.length > 0
-    ? rawAllowedOrigins
-    : isProduction
-        ? []
-        : ["http://localhost:5173", "http://127.0.0.1:5173"];
-if (isProduction && allowedOrigins.length === 0) {
-    throw new Error("ALLOWED_ORIGINS must be configured in production.");
-}
+const port = appConfig.port;
+const nodeEnv = appConfig.nodeEnv;
+const isProduction = appConfig.isProduction;
+const allowedOrigins = appConfig.allowedOrigins;
+const supabaseOrigin = (() => {
+    const raw = appConfig.supabaseUrl || "";
+    if (!raw)
+        return null;
+    try {
+        return new URL(raw).origin;
+    }
+    catch {
+        return null;
+    }
+})();
+app.set("trust proxy", 1);
+app.disable("x-powered-by");
+app.use(httpLogger);
 app.use(cors({
     origin: (origin, callback) => {
         if (!origin) {
@@ -55,36 +63,115 @@ app.use(cors({
         "X-Upload-Id",
         "X-Chunk-Index",
         "X-Total-Chunks",
+        "X-CSRF-Token",
     ],
     exposedHeaders: ["Content-Disposition"],
+    credentials: true,
     preflightContinue: false,
     optionsSuccessStatus: 204,
 }));
+app.use(rejectDisallowedOrigin);
+const globalLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 200,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests. Please slow down and try again." },
+});
 const authLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: 5,
+    windowMs: 15 * 60 * 1000,
+    max: 20,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "Too many authentication attempts. Please try again later." },
 });
-const FREE_FILE_SIZE_LIMIT = 100 * 1024 * 1024;
-const PRO_FILE_SIZE_LIMIT = 10 * 1024 * 1024 * 1024;
+const tokenLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many token requests. Please try again later." },
+});
+const fileListLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many file listing requests. Please try again later." },
+});
+const syncLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many sync requests. Please try again later." },
+});
+const uploadLimiter = rateLimit({
+    // Chunked uploads legitimately create many requests, so keep abuse protection
+    // without throttling normal medium/large file transfers.
+    windowMs: 15 * 60 * 1000,
+    max: 1500,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many upload requests. Please wait before uploading again." },
+});
+const MAX_SINGLE_FILE_SIZE = appConfig.maxFileSizeBytes;
+const MAX_TOTAL_USER_STORAGE = 500 * 1024 * 1024;
+const MAX_ACTIVE_UPLOADS_PER_USER = 10;
+const MAX_FILES_PER_SELECTION = 10;
+const FREE_FILE_SIZE_LIMIT = MAX_SINGLE_FILE_SIZE;
+const PRO_FILE_SIZE_LIMIT = MAX_SINGLE_FILE_SIZE;
 const MONTH_IN_MS = 30 * 24 * 60 * 60 * 1000;
-const OTP_FALLBACK_ENABLED = !isProduction && process.env.ALLOW_OTP_FALLBACK === "true";
-const DEMO_GOOGLE_LOGIN_ENABLED = !isProduction && process.env.ALLOW_DEMO_GOOGLE_LOGIN === "true";
+const OTP_FALLBACK_ENABLED = appConfig.allowOtpFallback;
+const DEMO_GOOGLE_LOGIN_ENABLED = !isProduction && appConfig.allowDemoGoogleLogin;
+const strictContentSecurityPolicyDirectives = {
+    defaultSrc: ["'self'"],
+    scriptSrc: ["'self'"],
+    styleSrc: ["'self'"],
+    imgSrc: ["'self'", "data:", "blob:"],
+    mediaSrc: ["'self'", "blob:"],
+    connectSrc: ["'self'", ...allowedOrigins, ...(supabaseOrigin ? [supabaseOrigin] : [])],
+    objectSrc: ["'none'"],
+    baseUri: ["'self'"],
+    frameAncestors: ["'none'"],
+    formAction: ["'self'"],
+};
 app.use(helmet({
     crossOriginResourcePolicy: false,
+    contentSecurityPolicy: {
+        directives: strictContentSecurityPolicyDirectives,
+    },
+    hsts: isProduction
+        ? {
+            maxAge: 31536000,
+            includeSubDomains: true,
+            preload: true,
+        }
+        : false,
+    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+    permittedCrossDomainPolicies: { permittedPolicies: "none" },
 }));
+app.use((_req, res, next) => {
+    res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    next();
+});
+app.use(globalLimiter);
+app.get("/admin", (req, res) => {
+    logger.warn({ ip: req.ip, userAgent: req.headers["user-agent"] }, "Honeypot route hit");
+    res.json({ status: "ok", system: "public", message: "No administrative access exposed." });
+});
 // Skip body parsing for the binary file upload route — it reads req stream directly
 app.use((req, res, next) => {
     if (req.path === "/api/file-transfers/upload" || req.path === "/api/file-transfers/chunk")
         return next();
-    express.json({ limit: "160mb" })(req, res, next);
+    express.json({ limit: "2mb" })(req, res, next);
 });
 app.use((req, res, next) => {
     if (req.path === "/api/file-transfers/upload" || req.path === "/api/file-transfers/chunk")
         return next();
-    express.urlencoded({ extended: true, limit: "160mb" })(req, res, next);
+    express.urlencoded({ extended: true, limit: "2mb" })(req, res, next);
 });
 const registerSchema = z.object({
     email: z.string().trim().email().max(120),
@@ -208,9 +295,16 @@ const uploadChunkHeadersSchema = z.object({
     "x-total-chunks": z.coerce.number().int().min(1),
 });
 const uploadSessions = new Map();
-const LARGE_UPLOAD_CHUNK_BYTES = 6 * 1024 * 1024;
+const LARGE_UPLOAD_CHUNK_BYTES = 50 * 1024 * 1024;
 const UPLOAD_TEMP_ROOT = path.join(os.tmpdir(), "unilink-upload-sessions");
 const UPLOAD_SESSION_STALE_MS = 30 * 60 * 1000;
+const UPLOAD_REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
+const ALLOWED_UPLOAD_MIME_PREFIXES = ["image/", "video/", "audio/", "text/"];
+const ALLOWED_EXACT_MIME_TYPES = new Set([
+    "application/pdf",
+    "application/zip",
+    "application/x-zip-compressed",
+]);
 const isSubscriptionActive = (user) => user.role === "admin" ||
     (user.plan === "pro" &&
         Boolean(user.subscriptionExpiresAt) &&
@@ -229,7 +323,7 @@ const blockedEmailDomains = new Set([
     "guerrillamail.com",
     "sharklasers.com",
 ]);
-const normalizeEmail = (email) => email.trim().toLowerCase();
+const normalizeEmail = (email) => sanitizeTextInput(email, 120).toLowerCase();
 const isLikelyRealEmail = (email) => {
     const normalized = normalizeEmail(email);
     const [, domain = ""] = normalized.split("@");
@@ -241,7 +335,7 @@ const assertValidEmailAddress = (email) => {
     }
     return null;
 };
-const createOtp = () => `${Math.floor(100000 + Math.random() * 900000)}`;
+const createOtp = () => `${randomInt(100000, 1000000)}`;
 const isStrongPassword = (password) => password.length >= 8 && /[^A-Za-z0-9]/.test(password);
 const isValidMobileNumber = (mobileNumber) => /^\+\d{1,3}\s\d{4}-\d{6}$/.test(mobileNumber.trim());
 const getLatestEmailVerification = (db, email) => db.emailVerifications
@@ -253,6 +347,12 @@ const isEmailVerificationValid = (verification) => Boolean(verification &&
 const consumeExpiredEmailVerifications = (db) => {
     db.emailVerifications = db.emailVerifications.filter((entry) => new Date(entry.expiresAt).getTime() > Date.now());
 };
+const registrationOtpFallbackResponse = (message, otp) => ({
+    success: true,
+    message,
+    developmentOtp: otp,
+    deliveryMode: "fallback",
+});
 const refreshUserPlan = (user) => {
     if (user.role === "admin") {
         if (user.plan !== "pro") {
@@ -280,10 +380,96 @@ const countWords = (content) => content
     .split(/\s+/)
     .filter(Boolean).length;
 const getClipboardWordLimit = (user) => isSubscriptionActive(user) ? PRO_CLIPBOARD_WORD_LIMIT : FREE_CLIPBOARD_WORD_LIMIT;
-const formatLimitLabel = (bytes) => (bytes >= 1024 * 1024 * 1024 ? "10 GB" : "100 MB");
+const bytesToLabel = (bytes) => {
+    if (bytes >= 1024 * 1024 * 1024)
+        return `${Math.round(bytes / (1024 * 1024 * 1024))} GB`;
+    if (bytes >= 1024 * 1024)
+        return `${Math.round(bytes / (1024 * 1024))} MB`;
+    if (bytes >= 1024)
+        return `${Math.round(bytes / 1024)} KB`;
+    return `${bytes} B`;
+};
+const formatLimitLabel = (bytes) => bytesToLabel(bytes);
 const getUploadLimitMessage = (user, limit) => isSubscriptionActive(user)
     ? `Your Pro plan supports files up to ${formatLimitLabel(limit)}.`
-    : `This file can't be uploaded under the Free plan. Upgrade to Pro to share files up to 10 GB.`;
+    : `Your current plan supports files up to ${formatLimitLabel(limit)}.`;
+const sanitizeStoredFileName = (fileName) => sanitizeFilename(fileName).slice(0, 140);
+const FILE_EXTENSION_REGEX = /\.[a-z0-9]{1,10}$/i;
+const createStorageObjectPath = (userId, fileName) => {
+    const extension = fileName.match(FILE_EXTENSION_REGEX)?.[0]?.toLowerCase() || "";
+    return ensureRelativeStoragePath(`${userId}/${randomUUID()}${extension}`);
+};
+const isAllowedMimeType = (mimeType) => {
+    const normalizedMimeType = sanitizeMimeType(mimeType);
+    return (ALLOWED_UPLOAD_MIME_PREFIXES.some((prefix) => normalizedMimeType.startsWith(prefix)) ||
+        ALLOWED_EXACT_MIME_TYPES.has(normalizedMimeType));
+};
+const assertAllowedMimeType = (mimeType) => {
+    if (!isAllowedMimeType(mimeType)) {
+        return "Unsupported file type. Allowed types: images, videos, audio, text, PDF, and ZIP.";
+    }
+    return null;
+};
+const calculateUserStorageUsage = (db, userId) => db.fileTransfers
+    .filter((transfer) => transfer.userId === userId &&
+    transfer.transferStatus !== "failed" &&
+    transfer.transferStatus !== "cancelled")
+    .reduce((total, transfer) => total + transfer.fileSize, 0);
+const getActiveUploadCountForUser = (userId) => Array.from(uploadSessions.values()).filter((session) => session.userId === userId).length;
+const assertUploadConstraints = (db, user, fileName, fileSize, fileType) => {
+    const cleanedFileName = sanitizeStoredFileName(fileName);
+    const mimeTypeError = assertAllowedMimeType(fileType);
+    if (mimeTypeError) {
+        return { status: 400, error: mimeTypeError };
+    }
+    if (cleanedFileName !== fileName && sanitizeStoredFileName(cleanedFileName) !== cleanedFileName) {
+        return { status: 400, error: "Invalid file name." };
+    }
+    const perFileLimit = getUserFileLimit(user);
+    if (fileSize > perFileLimit) {
+        return {
+            status: 413,
+            error: getUploadLimitMessage(user, perFileLimit),
+            fileLimit: perFileLimit,
+        };
+    }
+    const projectedUsage = calculateUserStorageUsage(db, user.id) + fileSize;
+    if (projectedUsage > MAX_TOTAL_USER_STORAGE) {
+        return {
+            status: 413,
+            error: `Storage quota exceeded. UniLink currently allows up to ${bytesToLabel(MAX_TOTAL_USER_STORAGE)} total data per account.`,
+        };
+    }
+    if (getActiveUploadCountForUser(user.id) >= MAX_ACTIVE_UPLOADS_PER_USER) {
+        return {
+            status: 429,
+            error: `Too many active uploads. Please wait for current uploads to finish before starting more than ${MAX_ACTIVE_UPLOADS_PER_USER}.`,
+        };
+    }
+    return null;
+};
+const scanUploadedPayload = async (_fileName, _mimeType, _size) => {
+    // Placeholder for future ClamAV integration.
+    // In production, replace with a real scan and block upload when malware is detected.
+    return { clean: true };
+};
+const validateUploadedFileBuffer = async (fileBuffer, declaredMimeType, declaredSize) => {
+    if (containsNullBytes(fileBuffer)) {
+        return "File payload contains invalid null bytes.";
+    }
+    const detectedFileType = await fileTypeFromBuffer(fileBuffer);
+    const effectiveMimeType = detectedFileType?.mime || declaredMimeType;
+    if (!isAllowedMimeType(effectiveMimeType)) {
+        return "Unsupported file type. Allowed types: images, videos, audio, text, PDF, and ZIP.";
+    }
+    if (declaredMimeType && detectedFileType?.mime && detectedFileType.mime !== declaredMimeType) {
+        return "Declared content type does not match the uploaded file.";
+    }
+    if (isZipBombCandidate(effectiveMimeType, declaredSize, fileBuffer.length)) {
+        return "Compressed archive appears unsafe.";
+    }
+    return null;
+};
 const parseUploadHeaders = (headers) => uploadHeadersSchema.safeParse({
     "x-file-name": typeof headers["x-file-name"] === "string"
         ? decodeURIComponent(headers["x-file-name"])
@@ -299,6 +485,7 @@ const parseUploadChunkHeaders = (headers) => uploadChunkHeadersSchema.safeParse(
     "x-chunk-index": headers["x-chunk-index"],
     "x-total-chunks": headers["x-total-chunks"],
 });
+const getOwnedTransfer = (db, userId, transferId) => db.fileTransfers.find((entry) => entry.id === transferId && entry.userId === userId) || null;
 const getUploadChunkPath = (session, chunkIndex) => path.join(session.tempDir, `${String(chunkIndex).padStart(6, "0")}.part`);
 const getUploadedChunkIndices = async (session) => {
     if (session.uploadedChunks.size > 0) {
@@ -403,10 +590,15 @@ const buildPairSession = (userId) => {
 };
 const isPairSessionExpired = (session) => Boolean(session.usedAt) || new Date(session.expiresAt).getTime() <= Date.now();
 app.get("/api/health", async (_req, res) => {
-    await loadDb();
-    res.json({ status: "ok" });
+    try {
+        await loadDb();
+        res.json({ status: "ok", uptime: process.uptime(), db: "connected" });
+    }
+    catch {
+        res.status(503).json({ status: "error", uptime: process.uptime(), db: "error" });
+    }
 });
-app.post("/api/auth/request-registration-otp", authLimiter, async (req, res) => {
+app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) => {
     const parsed = registrationOtpRequestSchema.safeParse(req.body);
     if (!parsed.success) {
         res.status(400).json({ error: "Enter a valid email address" });
@@ -416,12 +608,6 @@ app.post("/api/auth/request-registration-otp", authLimiter, async (req, res) => 
     const emailError = assertValidEmailAddress(email);
     if (emailError) {
         res.status(400).json({ error: emailError });
-        return;
-    }
-    if (!isEmailVerificationConfigured()) {
-        res.status(503).json({
-            error: "Email verification is not configured yet. Add SMTP settings on the server first.",
-        });
         return;
     }
     try {
@@ -444,6 +630,16 @@ app.post("/api/auth/request-registration-otp", authLimiter, async (req, res) => 
         db.emailVerifications = db.emailVerifications.filter((entry) => !(entry.email === email && entry.purpose === "register"));
         db.emailVerifications.unshift(verification);
         await saveDb(db);
+        if (!isEmailVerificationConfigured()) {
+            if (OTP_FALLBACK_ENABLED) {
+                res.json(registrationOtpFallbackResponse("Email delivery is not configured right now. Use the temporary OTP shown below to continue signup.", otp));
+                return;
+            }
+            res.status(503).json({
+                error: "Email verification is not configured yet. Add SMTP settings on the server first.",
+            });
+            return;
+        }
         try {
             await sendRegistrationOtp(email, otp);
             res.json({
@@ -453,13 +649,11 @@ app.post("/api/auth/request-registration-otp", authLimiter, async (req, res) => 
             return;
         }
         catch (mailError) {
-            if (OTP_FALLBACK_ENABLED && isMailtrapDemoRestrictionError(mailError)) {
-                res.json({
-                    success: true,
-                    message: "Email delivery is in testing mode. Use the temporary OTP shown below.",
-                    developmentOtp: otp,
-                    deliveryMode: "fallback",
-                });
+            if (OTP_FALLBACK_ENABLED) {
+                const fallbackMessage = isMailtrapDemoRestrictionError(mailError)
+                    ? "Email delivery is in testing mode. Use the temporary OTP shown below."
+                    : "Email delivery is temporarily unavailable. Use the temporary OTP shown below to continue signup.";
+                res.json(registrationOtpFallbackResponse(fallbackMessage, otp));
                 return;
             }
             throw mailError;
@@ -535,8 +729,8 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
         const user = {
             id: createId(),
             email,
-            firstName: parsed.data.firstName.trim(),
-            lastName: parsed.data.lastName.trim(),
+            firstName: sanitizeTextInput(parsed.data.firstName, 60),
+            lastName: sanitizeTextInput(parsed.data.lastName, 60),
             passwordHash: await hashPassword(parsed.data.password),
             createdAt: timestamp,
             updatedAt: timestamp,
@@ -548,8 +742,12 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
         db.users.push(user);
         db.emailVerifications = db.emailVerifications.filter((entry) => !(entry.email === email && entry.purpose === "register"));
         await saveDb(db);
+        const { token } = signAuthToken(user);
+        const csrfToken = createCsrfToken();
+        setAuthCookies(res, token, csrfToken, false);
         res.status(201).json({
-            token: signToken(user),
+            token,
+            csrfToken,
             user: userResponse(user),
         });
     }
@@ -580,8 +778,12 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
         if (refreshUserPlan(user)) {
             await saveDb(db);
         }
+        const { token } = signAuthToken(user, parsed.data.rememberMe);
+        const csrfToken = createCsrfToken();
+        setAuthCookies(res, token, csrfToken, Boolean(parsed.data.rememberMe));
         res.json({
-            token: signToken(user, parsed.data.rememberMe),
+            token,
+            csrfToken,
             user: userResponse(user),
         });
     }
@@ -590,7 +792,7 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
         res.status(500).json({ error: "Unable to sign in right now. Please try again." });
     }
 });
-app.post("/api/auth/google", authLimiter, async (req, res) => {
+app.post("/api/auth/google", tokenLimiter, async (req, res) => {
     if (!DEMO_GOOGLE_LOGIN_ENABLED) {
         res.status(501).json({ error: "Google login is not configured." });
         return;
@@ -633,8 +835,12 @@ app.post("/api/auth/google", authLimiter, async (req, res) => {
         if (refreshUserPlan(user)) {
             await saveDb(db);
         }
+        const { token } = signAuthToken(user, parsed.data.rememberMe);
+        const csrfToken = createCsrfToken();
+        setAuthCookies(res, token, csrfToken, Boolean(parsed.data.rememberMe));
         res.json({
-            token: signToken(user, parsed.data.rememberMe),
+            token,
+            csrfToken,
             user: userResponse(user),
         });
     }
@@ -670,7 +876,7 @@ app.post("/api/auth/forgot-password", authLimiter, async (req, res) => {
         res.status(500).json({ error: "Unable to start password reset support right now." });
     }
 });
-app.post("/api/auth/change-password", requireAuth, async (req, res) => {
+app.post("/api/auth/change-password", requireAuth, requireCsrf, async (req, res) => {
     const parsed = changePasswordSchema.safeParse(req.body);
     if (!parsed.success) {
         const issue = parsed.error.issues[0];
@@ -818,7 +1024,7 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
     }
     res.json({ user: userResponse(user) });
 });
-app.post("/api/billing/subscribe", requireAuth, async (req, res) => {
+app.post("/api/billing/subscribe", requireAuth, requireCsrf, async (req, res) => {
     const parsed = billingSchema.safeParse(req.body);
     if (!parsed.success) {
         res.status(400).json({ error: "Invalid subscription request" });
@@ -922,12 +1128,12 @@ app.post("/api/pair-sessions/:code/claim", async (req, res) => {
     session.claimedDeviceId = device.id;
     await saveDb(db);
     res.json({
-        token: signToken(user, true),
+        token: signAuthToken(user, true).token,
         user: userResponse(user),
         device,
     });
 });
-app.patch("/api/auth/profile", requireAuth, async (req, res) => {
+app.patch("/api/auth/profile", requireAuth, requireCsrf, async (req, res) => {
     const parsed = profileSchema.safeParse(req.body);
     if (!parsed.success) {
         res.status(400).json({ error: "Invalid profile update" });
@@ -970,7 +1176,7 @@ app.get("/api/devices", requireAuth, async (req, res) => {
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     res.json(devices);
 });
-app.post("/api/devices", requireAuth, async (req, res) => {
+app.post("/api/devices", requireAuth, requireCsrf, async (req, res) => {
     const parsed = deviceSchema.safeParse(req.body);
     if (!parsed.success) {
         res.status(400).json({ error: "Invalid device payload" });
@@ -979,8 +1185,16 @@ app.post("/api/devices", requireAuth, async (req, res) => {
     const db = await loadDb();
     const timestamp = nowIso();
     const existing = db.devices.find((device) => device.userId === req.auth.userId && device.deviceId === parsed.data.deviceId);
+    const isGenericDeviceName = (value) => /^(browser|chrome|edge|firefox|safari|opera)$/i.test(value.trim()) ||
+        /^browser on [a-z0-9 _-]+$/i.test(value.trim()) ||
+        /^(chrome|edge|firefox|safari|opera) on [a-z0-9 _-]+$/i.test(value.trim()) ||
+        /^[a-z0-9 _-]+ browser$/i.test(value.trim());
     if (existing) {
-        existing.deviceName = parsed.data.deviceName;
+        const incomingName = parsed.data.deviceName.trim();
+        const shouldPreserveExistingName = existing.deviceName.trim() &&
+            !isGenericDeviceName(existing.deviceName) &&
+            isGenericDeviceName(incomingName);
+        existing.deviceName = shouldPreserveExistingName ? existing.deviceName : incomingName;
         existing.deviceType = parsed.data.deviceType;
         existing.platform = parsed.data.platform;
         existing.publicKey = parsed.data.publicKey;
@@ -1035,7 +1249,7 @@ app.get("/api/clipboard", requireAuth, async (req, res) => {
         .filter((item) => item.userId === req.auth.userId)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
 });
-app.post("/api/clipboard", requireAuth, async (req, res) => {
+app.post("/api/clipboard", syncLimiter, requireAuth, requireCsrf, async (req, res) => {
     const parsed = clipboardSchema.safeParse(req.body);
     if (!parsed.success) {
         res.status(400).json({ error: "Invalid clipboard payload" });
@@ -1050,7 +1264,7 @@ app.post("/api/clipboard", requireAuth, async (req, res) => {
     if (refreshUserPlan(user)) {
         await saveDb(db);
     }
-    const content = parsed.data.content.trim();
+    const content = sanitizeTextInput(parsed.data.content, 10000);
     const wordCount = countWords(content);
     const wordLimit = getClipboardWordLimit(user);
     if (wordCount > wordLimit) {
@@ -1090,19 +1304,19 @@ app.post("/api/clipboard", requireAuth, async (req, res) => {
     await saveDb(db);
     res.status(201).json(item);
 });
-app.delete("/api/clipboard/:id", requireAuth, async (req, res) => {
+app.delete("/api/clipboard/:id", syncLimiter, requireAuth, requireCsrf, async (req, res) => {
     const db = await loadDb();
     db.clipboard = db.clipboard.filter((entry) => !(entry.id === req.params.id && entry.userId === req.auth.userId));
     await saveDb(db);
     res.status(204).send();
 });
-app.get("/api/file-transfers", requireAuth, async (req, res) => {
+app.get("/api/file-transfers", fileListLimiter, requireAuth, async (req, res) => {
     const db = await loadDb();
     res.json(db.fileTransfers
         .filter((transfer) => transfer.userId === req.auth.userId)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
 });
-app.post("/api/file-transfers/initiate", requireAuth, async (req, res) => {
+app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf, async (req, res) => {
     await cleanupStaleUploadSessions();
     const parsed = uploadInitSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -1118,27 +1332,29 @@ app.post("/api/file-transfers/initiate", requireAuth, async (req, res) => {
     if (refreshUserPlan(user)) {
         await saveDb(db);
     }
-    const fileLimit = getUserFileLimit(user);
-    if (parsed.data.fileSize > fileLimit) {
-        res.status(400).json({
-            error: getUploadLimitMessage(user, fileLimit),
-            fileLimit,
+    const sanitizedFileName = sanitizeStoredFileName(parsed.data.fileName);
+    const sanitizedFileType = sanitizeMimeType(parsed.data.fileType);
+    const uploadConstraintError = assertUploadConstraints(db, user, sanitizedFileName, parsed.data.fileSize, sanitizedFileType);
+    if (uploadConstraintError) {
+        res.status(uploadConstraintError.status).json({
+            error: uploadConstraintError.error,
+            fileLimit: getUserFileLimit(user),
             plan: isSubscriptionActive(user) ? "pro" : "free",
         });
         return;
     }
     const transferId = createId();
     const uploadId = createId();
-    const storagePath = `${req.auth.userId}/${transferId}-${sanitizeFilename(parsed.data.fileName)}`;
+    const storagePath = ensureRelativeStoragePath(`${req.auth.userId}/${randomUUID()}-${sanitizedFileName}`);
     const tempDir = path.join(UPLOAD_TEMP_ROOT, uploadId);
     await mkdir(tempDir, { recursive: true });
     const session = {
         id: uploadId,
         userId: req.auth.userId,
         transferId,
-        fileName: parsed.data.fileName,
+        fileName: sanitizedFileName,
         fileSize: parsed.data.fileSize,
-        fileType: parsed.data.fileType,
+        fileType: sanitizedFileType,
         senderDeviceId: parsed.data.senderDeviceId,
         receiverDeviceId: parsed.data.receiverDeviceId,
         transferMethod: parsed.data.transferMethod,
@@ -1156,9 +1372,9 @@ app.post("/api/file-transfers/initiate", requireAuth, async (req, res) => {
         userId: req.auth.userId,
         senderDeviceId: parsed.data.senderDeviceId,
         receiverDeviceId: parsed.data.receiverDeviceId,
-        fileName: parsed.data.fileName,
+        fileName: sanitizedFileName,
         fileSize: parsed.data.fileSize,
-        fileType: parsed.data.fileType,
+        fileType: sanitizedFileType,
         transferStatus: "in_progress",
         transferMethod: parsed.data.transferMethod,
         createdAt: session.createdAt,
@@ -1172,11 +1388,11 @@ app.post("/api/file-transfers/initiate", requireAuth, async (req, res) => {
         chunkSize: session.chunkSize,
         totalChunks: session.totalChunks,
         uploadedChunks: [],
-        fileLimit,
+        fileLimit: getUserFileLimit(user),
         message: "Chunk upload session ready.",
     });
 });
-app.get("/api/file-transfers/upload-status/:uploadId", requireAuth, async (req, res) => {
+app.get("/api/file-transfers/upload-status/:uploadId", fileListLimiter, requireAuth, async (req, res) => {
     await cleanupStaleUploadSessions();
     const uploadId = typeof req.params.uploadId === "string" ? req.params.uploadId : "";
     if (!uploadId) {
@@ -1201,7 +1417,7 @@ app.get("/api/file-transfers/upload-status/:uploadId", requireAuth, async (req, 
         transferStatus: transfer?.transferStatus || "in_progress",
     });
 });
-app.delete("/api/file-transfers/upload-session/:uploadId", requireAuth, async (req, res) => {
+app.delete("/api/file-transfers/upload-session/:uploadId", uploadLimiter, requireAuth, requireCsrf, async (req, res) => {
     await cleanupStaleUploadSessions();
     const uploadId = typeof req.params.uploadId === "string" ? req.params.uploadId : "";
     if (!uploadId) {
@@ -1223,7 +1439,7 @@ app.delete("/api/file-transfers/upload-session/:uploadId", requireAuth, async (r
     await cleanupUploadSession(session);
     res.status(204).send();
 });
-app.post("/api/file-transfers/chunk", requireAuth, async (req, res) => {
+app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, async (req, res) => {
     await cleanupStaleUploadSessions();
     const parsed = parseUploadChunkHeaders(req.headers);
     if (!parsed.success) {
@@ -1264,12 +1480,29 @@ app.post("/api/file-transfers/chunk", requireAuth, async (req, res) => {
     try {
         await new Promise((resolve, reject) => {
             const output = createWriteStream(chunkPath);
+            let settled = false;
+            const rejectOnce = (error) => {
+                if (settled)
+                    return;
+                settled = true;
+                output.destroy(error);
+                reject(error);
+            };
             req.on("data", (chunk) => {
                 bytesWritten += chunk.length;
+                if (bytesWritten > expectedChunkSize) {
+                    rejectOnce(new Error("Uploaded chunk exceeded the expected size."));
+                }
             });
-            req.on("error", reject);
-            output.on("error", reject);
-            output.on("finish", resolve);
+            req.on("aborted", () => rejectOnce(new Error("Upload chunk was interrupted before completion.")));
+            req.on("error", (error) => rejectOnce(error));
+            output.on("error", (error) => rejectOnce(error));
+            output.on("finish", () => {
+                if (settled)
+                    return;
+                settled = true;
+                resolve();
+            });
             req.pipe(output);
         });
     }
@@ -1291,7 +1524,7 @@ app.post("/api/file-transfers/chunk", requireAuth, async (req, res) => {
         bytesWritten,
     });
 });
-app.post("/api/file-transfers/complete-upload", requireAuth, async (req, res) => {
+app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requireCsrf, async (req, res) => {
     await cleanupStaleUploadSessions();
     const uploadId = typeof req.body?.uploadId === "string" ? req.body.uploadId : "";
     if (!uploadId) {
@@ -1343,10 +1576,16 @@ app.post("/api/file-transfers/complete-upload", requireAuth, async (req, res) =>
             output.on("error", reject);
             appendNext(0);
         });
+        const scanResult = await scanUploadedPayload(session.fileName, sanitizeMimeType(session.fileType), session.fileSize);
+        if (!scanResult.clean) {
+            session.isCompleting = false;
+            res.status(400).json({ error: "The uploaded file failed security scanning." });
+            return;
+        }
         const { error: uploadError } = await supabase.storage
             .from(FILE_BUCKET)
-            .upload(session.storagePath, createReadStream(assembledPath), {
-            contentType: session.fileType || "application/octet-stream",
+            .upload(ensureRelativeStoragePath(session.storagePath), createReadStream(assembledPath), {
+            contentType: sanitizeMimeType(session.fileType),
             upsert: false,
         });
         if (uploadError) {
@@ -1397,7 +1636,12 @@ app.post("/api/file-transfers/complete-upload", requireAuth, async (req, res) =>
         res.status(500).json({ error: "Failed to finalize upload." });
     }
 });
-app.post("/api/file-transfers/upload", requireAuth, async (req, res) => {
+app.post("/api/auth/logout", requireAuth, async (req, res) => {
+    await revokeToken(req.auth.jti, "logout");
+    clearAuthCookies(res);
+    res.status(204).send();
+});
+app.post("/api/file-transfers/upload", uploadLimiter, requireAuth, requireCsrf, async (req, res) => {
     const parsedHeaders = parseUploadHeaders(req.headers);
     if (!parsedHeaders.success) {
         res.status(400).json({ error: "Invalid upload metadata" });
@@ -1412,17 +1656,19 @@ app.post("/api/file-transfers/upload", requireAuth, async (req, res) => {
     if (refreshUserPlan(user)) {
         await saveDb(db);
     }
-    const fileLimit = getUserFileLimit(user);
-    if (parsedHeaders.data["x-file-size"] > fileLimit) {
-        res.status(400).json({
-            error: getUploadLimitMessage(user, fileLimit),
-            fileLimit,
+    const sanitizedFileName = sanitizeStoredFileName(parsedHeaders.data["x-file-name"]);
+    const sanitizedFileType = sanitizeMimeType(parsedHeaders.data["x-file-type"]);
+    const uploadConstraintError = assertUploadConstraints(db, user, sanitizedFileName, parsedHeaders.data["x-file-size"], sanitizedFileType);
+    if (uploadConstraintError) {
+        res.status(uploadConstraintError.status).json({
+            error: uploadConstraintError.error,
+            fileLimit: getUserFileLimit(user),
             plan: isSubscriptionActive(user) ? "pro" : "free",
         });
         return;
     }
     const transferId = createId();
-    const storagePath = `${req.auth.userId}/${transferId}-${sanitizeFilename(parsedHeaders.data["x-file-name"])}`;
+    const storagePath = createStorageObjectPath(req.auth.userId, sanitizedFileName);
     // Buffer the request body into memory, enforcing the size limit.
     // Using Writable (not Transform) avoids backpressure from an unconsumed readable side.
     let bytesWritten = 0;
@@ -1432,8 +1678,8 @@ app.post("/api/file-transfers/upload", requireAuth, async (req, res) => {
             const sink = new Writable({
                 write(chunk, _enc, cb) {
                     bytesWritten += chunk.length;
-                    if (bytesWritten > fileLimit) {
-                        cb(new Error(`File exceeds the ${formatLimitLabel(fileLimit)} plan limit.`));
+                    if (bytesWritten > MAX_SINGLE_FILE_SIZE) {
+                        cb(new Error(`File exceeds the ${formatLimitLabel(MAX_SINGLE_FILE_SIZE)} upload limit.`));
                     }
                     else {
                         chunks.push(chunk);
@@ -1457,10 +1703,20 @@ app.post("/api/file-transfers/upload", requireAuth, async (req, res) => {
         return;
     }
     const fileBuffer = Buffer.concat(chunks);
+    const fileValidationError = await validateUploadedFileBuffer(fileBuffer, sanitizedFileType, parsedHeaders.data["x-file-size"]);
+    if (fileValidationError) {
+        res.status(400).json({ error: fileValidationError });
+        return;
+    }
+    const scanResult = await scanUploadedPayload(sanitizedFileName, sanitizedFileType, parsedHeaders.data["x-file-size"]);
+    if (!scanResult.clean) {
+        res.status(400).json({ error: "The uploaded file failed security scanning." });
+        return;
+    }
     const { error: uploadError } = await supabase.storage
         .from(FILE_BUCKET)
-        .upload(storagePath, fileBuffer, {
-        contentType: parsedHeaders.data["x-file-type"] || "application/octet-stream",
+        .upload(ensureRelativeStoragePath(storagePath), fileBuffer, {
+        contentType: sanitizedFileType,
         upsert: false,
     });
     if (uploadError) {
@@ -1473,9 +1729,9 @@ app.post("/api/file-transfers/upload", requireAuth, async (req, res) => {
         userId: req.auth.userId,
         senderDeviceId: parsedHeaders.data["x-sender-device-id"],
         receiverDeviceId: parsedHeaders.data["x-receiver-device-id"],
-        fileName: parsedHeaders.data["x-file-name"],
+        fileName: sanitizedFileName,
         fileSize: parsedHeaders.data["x-file-size"],
-        fileType: parsedHeaders.data["x-file-type"],
+        fileType: sanitizedFileType,
         transferStatus: "completed",
         transferMethod: parsedHeaders.data["x-transfer-method"] || "cloud",
         createdAt: nowIso(),
@@ -1486,7 +1742,7 @@ app.post("/api/file-transfers/upload", requireAuth, async (req, res) => {
     await saveDb(db);
     res.status(201).json(transfer);
 });
-app.post("/api/file-transfers", requireAuth, async (req, res) => {
+app.post("/api/file-transfers", uploadLimiter, requireAuth, requireCsrf, async (req, res) => {
     const parsed = fileTransferSchema.safeParse(req.body);
     if (!parsed.success) {
         res.status(400).json({ error: "Invalid file transfer payload" });
@@ -1501,11 +1757,13 @@ app.post("/api/file-transfers", requireAuth, async (req, res) => {
     if (refreshUserPlan(user)) {
         await saveDb(db);
     }
-    const fileLimit = getUserFileLimit(user);
-    if (parsed.data.fileSize > fileLimit) {
-        res.status(400).json({
-            error: getUploadLimitMessage(user, fileLimit),
-            fileLimit,
+    const sanitizedFileName = sanitizeStoredFileName(parsed.data.fileName);
+    const sanitizedFileType = sanitizeMimeType(parsed.data.fileType);
+    const uploadConstraintError = assertUploadConstraints(db, user, sanitizedFileName, parsed.data.fileSize, sanitizedFileType);
+    if (uploadConstraintError) {
+        res.status(uploadConstraintError.status).json({
+            error: uploadConstraintError.error,
+            fileLimit: getUserFileLimit(user),
             plan: isSubscriptionActive(user) ? "pro" : "free",
         });
         return;
@@ -1513,12 +1771,22 @@ app.post("/api/file-transfers", requireAuth, async (req, res) => {
     const base64Data = typeof req.body.fileData === "string" ? req.body.fileData : "";
     if (base64Data) {
         const transferId = createId();
-        const storagePath = `${req.auth.userId}/${transferId}-${sanitizeFilename(parsed.data.fileName)}`;
+        const storagePath = createStorageObjectPath(req.auth.userId, sanitizedFileName);
         const buffer = Buffer.from(base64Data, "base64");
+        const fileValidationError = await validateUploadedFileBuffer(buffer, sanitizedFileType, parsed.data.fileSize);
+        if (fileValidationError) {
+            res.status(400).json({ error: fileValidationError });
+            return;
+        }
+        const scanResult = await scanUploadedPayload(sanitizedFileName, sanitizedFileType, parsed.data.fileSize);
+        if (!scanResult.clean) {
+            res.status(400).json({ error: "The uploaded file failed security scanning." });
+            return;
+        }
         const { error: uploadError } = await supabase.storage
             .from(FILE_BUCKET)
-            .upload(storagePath, buffer, {
-            contentType: parsed.data.fileType || "application/octet-stream",
+            .upload(ensureRelativeStoragePath(storagePath), buffer, {
+            contentType: sanitizedFileType,
             upsert: false,
         });
         if (uploadError) {
@@ -1531,9 +1799,9 @@ app.post("/api/file-transfers", requireAuth, async (req, res) => {
             userId: req.auth.userId,
             senderDeviceId: parsed.data.senderDeviceId,
             receiverDeviceId: parsed.data.receiverDeviceId,
-            fileName: parsed.data.fileName,
+            fileName: sanitizedFileName,
             fileSize: parsed.data.fileSize,
-            fileType: parsed.data.fileType,
+            fileType: sanitizedFileType,
             transferStatus: "completed",
             transferMethod: parsed.data.transferMethod,
             createdAt: nowIso(),
@@ -1550,9 +1818,9 @@ app.post("/api/file-transfers", requireAuth, async (req, res) => {
         userId: req.auth.userId,
         senderDeviceId: parsed.data.senderDeviceId,
         receiverDeviceId: parsed.data.receiverDeviceId,
-        fileName: parsed.data.fileName,
+        fileName: sanitizedFileName,
         fileSize: parsed.data.fileSize,
-        fileType: parsed.data.fileType,
+        fileType: sanitizedFileType,
         transferStatus: "pending",
         transferMethod: parsed.data.transferMethod,
         createdAt: nowIso(),
@@ -1561,9 +1829,10 @@ app.post("/api/file-transfers", requireAuth, async (req, res) => {
     await saveDb(db);
     res.status(201).json(transfer);
 });
-app.patch("/api/file-transfers/:id", requireAuth, async (req, res) => {
+app.patch("/api/file-transfers/:id", syncLimiter, requireAuth, requireCsrf, async (req, res) => {
     const db = await loadDb();
-    const transfer = db.fileTransfers.find((entry) => entry.id === req.params.id && entry.userId === req.auth.userId);
+    const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const transfer = getOwnedTransfer(db, req.auth.userId, transferId);
     if (!transfer) {
         res.status(404).json({ error: "Transfer not found" });
         return;
@@ -1579,13 +1848,13 @@ app.patch("/api/file-transfers/:id", requireAuth, async (req, res) => {
 });
 const getTransferDownloadLink = async (userId, transferId) => {
     const db = await loadDb();
-    const transfer = db.fileTransfers.find((entry) => entry.id === transferId && entry.userId === userId);
+    const transfer = getOwnedTransfer(db, userId, transferId);
     if (!transfer?.filePath) {
         return { error: "File not found" };
     }
     const { data, error } = await supabase.storage
         .from(FILE_BUCKET)
-        .createSignedUrl(transfer.filePath, 60 * 5, {
+        .createSignedUrl(ensureRelativeStoragePath(transfer.filePath), 60 * 5, {
         download: transfer.fileName,
     });
     if (error || !data?.signedUrl) {
@@ -1597,7 +1866,7 @@ const getTransferDownloadLink = async (userId, transferId) => {
         signedUrl: data.signedUrl,
     };
 };
-app.get("/api/file-transfers/:id/download-link", requireAuth, async (req, res) => {
+app.get("/api/file-transfers/:id/download-link", fileListLimiter, requireAuth, async (req, res) => {
     const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const result = await getTransferDownloadLink(req.auth.userId, transferId);
     if ("error" in result) {
@@ -1609,7 +1878,7 @@ app.get("/api/file-transfers/:id/download-link", requireAuth, async (req, res) =
         fileName: result.transfer.fileName,
     });
 });
-app.get("/api/file-transfers/:id/download", requireAuth, async (req, res) => {
+app.get("/api/file-transfers/:id/download", fileListLimiter, requireAuth, async (req, res) => {
     const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const result = await getTransferDownloadLink(req.auth.userId, transferId);
     if ("error" in result) {
@@ -1784,7 +2053,7 @@ app.patch("/api/user/preferences", requireAuth, async (req, res) => {
     await saveDb(db);
     res.json({ preferences: user.preferences });
 });
-app.post("/api/sync/trigger", requireAuth, async (req, res) => {
+app.post("/api/sync/trigger", syncLimiter, requireAuth, requireCsrf, async (req, res) => {
     const db = await loadDb();
     const deviceCount = db.devices.filter((device) => device.userId === req.auth.userId).length;
     const clipboardCount = db.clipboard.filter((item) => item.userId === req.auth.userId).length;
@@ -1858,12 +2127,13 @@ app.delete("/api/bluetooth-devices/:id", requireAuth, async (req, res) => {
     await saveDb(db);
     res.status(204).send();
 });
-app.delete("/api/file-transfers/:id", requireAuth, async (req, res) => {
+app.delete("/api/file-transfers/:id", syncLimiter, requireAuth, requireCsrf, async (req, res) => {
     const db = await loadDb();
-    const transfer = db.fileTransfers.find((entry) => entry.id === req.params.id && entry.userId === req.auth.userId);
+    const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const transfer = getOwnedTransfer(db, req.auth.userId, transferId);
     if (transfer?.filePath) {
         // Remove from Supabase Storage (fire-and-forget, do not block the response)
-        supabase.storage.from(FILE_BUCKET).remove([transfer.filePath]).catch((err) => {
+        supabase.storage.from(FILE_BUCKET).remove([ensureRelativeStoragePath(transfer.filePath)]).catch((err) => {
             console.error("Supabase Storage delete error:", err);
         });
     }
@@ -1923,25 +2193,43 @@ app.get("/api/receive/:sessionId", requireAuth, async (req, res) => {
         res.status(500).json({ error: "Internal server error" });
     }
 });
-app.use((err, _req, res, _next) => {
-    console.error("Unhandled API error:", err);
-    if (err instanceof SyntaxError) {
-        res.status(400).json({ error: "Invalid request payload" });
+app.use(createErrorHandler());
+let server = null;
+const shutdown = (signal) => {
+    logger.warn({ signal }, "Graceful shutdown started");
+    if (!server) {
+        process.exit(0);
         return;
     }
-    if (err instanceof Error && err.message.includes("CORS")) {
-        res.status(403).json({ error: "Origin not allowed" });
-        return;
-    }
-    res.status(500).json({ error: "Internal server error" });
+    server.close(() => {
+        logger.info("HTTP server closed");
+        process.exit(0);
+    });
+    setTimeout(() => {
+        logger.error("Forcing shutdown after timeout");
+        process.exit(1);
+    }, 10_000).unref();
+};
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("unhandledRejection", (error) => {
+    logger.error({ err: error }, "Unhandled rejection");
+    shutdown("unhandledRejection");
+});
+process.on("uncaughtException", (error) => {
+    logger.error({ err: error }, "Uncaught exception");
+    shutdown("uncaughtException");
 });
 ensureDataDirs()
     .then(() => {
-    app.listen(port, () => {
-        console.log(`UniLink API listening on http://localhost:${port}`);
+    server = app.listen(port, () => {
+        logger.info({ port }, "UniLink API listening");
     });
+    server.requestTimeout = UPLOAD_REQUEST_TIMEOUT_MS;
+    server.headersTimeout = UPLOAD_REQUEST_TIMEOUT_MS + 60_000;
+    server.keepAliveTimeout = 65_000;
 })
     .catch((error) => {
-    console.error("Failed to initialize storage", error);
+    logger.fatal({ err: error }, "Failed to initialize storage");
     process.exit(1);
 });

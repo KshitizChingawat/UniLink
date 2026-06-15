@@ -99,6 +99,16 @@ const config: Config = {
           "0%": { transform: "translateX(-100%)" },
           "100%": { transform: "translateX(100%)" },
         },
+        "login-scan": {
+          "0%": { opacity: "0", transform: "translateY(-115%)" },
+          "18%, 72%": { opacity: "1" },
+          "100%": { opacity: "0", transform: "translateY(115%)" },
+        },
+        "energy-pass": {
+          "0%": { opacity: "0", transform: "translate(-130%, -50%) scaleX(0.7)" },
+          "18%": { opacity: "0.9" },
+          "100%": { opacity: "0", transform: "translate(210%, -50%) scaleX(1.05)" },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
@@ -109,6 +119,8 @@ const config: Config = {
         "slide-in": "slide-in 0.8s ease-out",
         "fade-in": "fade-in 0.4s ease-out",
         shimmer: "shimmer 2.8s linear infinite",
+        "login-scan": "login-scan 2.3s ease-in-out infinite",
+        "energy-pass": "energy-pass 1.25s ease-in-out infinite",
       },
     },
   },

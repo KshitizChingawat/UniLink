@@ -325,6 +325,13 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   const signOut = async () => {
     try {
+      try {
+        await apiFetch("/api/auth/logout", {
+          method: "POST",
+        });
+      } catch {
+        // Best-effort logout: local cleanup still proceeds if the backend is unavailable.
+      }
       localStorage.removeItem("auth_token");
       localStorage.removeItem("user_data");
       localStorage.removeItem(settingsKey);
