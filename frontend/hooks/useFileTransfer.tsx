@@ -233,6 +233,7 @@ export const useFileTransfer = () => {
     chunkSize: number,
     totalChunks: number,
     file: File,
+    authToken: string,
     uploadedChunks: number[] = []
   ) => {
     const uploadedChunkSet = new Set(uploadedChunks);
@@ -267,7 +268,7 @@ export const useFileTransfer = () => {
             xhr.withCredentials = true;
             xhr.open('POST', getApiUrl('/api/file-transfers/chunk'));
             xhr.timeout = chunkRequestTimeoutMs;
-            xhr.setRequestHeader('Authorization', `Bearer ${localStorage.getItem('auth_token')}`);
+            xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
             if (csrfToken) {
               xhr.setRequestHeader('X-CSRF-Token', csrfToken);
             }
@@ -516,7 +517,7 @@ export const useFileTransfer = () => {
         rekeyUploadTracking(uploadId, init.transferId);
         uploadId = init.transferId;
         uploadSessionIds.current[uploadId] = sessionUploadId;
-        await uploadLargeFileInChunks(uploadId, sessionUploadId, init.chunkSize, init.totalChunks, file, init.uploadedChunks || []);
+        await uploadLargeFileInChunks(uploadId, sessionUploadId, init.chunkSize, init.totalChunks, file, token, init.uploadedChunks || []);
 
         setUploadProgress((current) => ({
           ...current,
