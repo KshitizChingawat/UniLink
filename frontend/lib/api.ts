@@ -90,7 +90,17 @@ const pingApiBaseUrl = async (baseUrl: string) => {
       credentials: "omit",
       cache: "no-store",
     });
-    return response.ok;
+    if (!response.ok) {
+      return false;
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      return false;
+    }
+
+    const payload = (await response.json()) as { status?: unknown };
+    return payload?.status === "ok";
   } catch {
     return false;
   }
