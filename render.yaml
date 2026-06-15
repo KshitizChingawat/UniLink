@@ -2,7 +2,7 @@ services:
   - type: web
     name: unilink
     runtime: node
-    buildCommand: npm install && npm run build
+    buildCommand: npm ci --no-audit --no-fund && npm run build
     startCommand: npm run start
     envVars:
       - key: NODE_ENV

@@ -76,7 +76,7 @@ All across platforms like **Windows, macOS, Linux, Android, iOS, and browsers**.
 
 ### Deployment
 
-* Render (Frontend + Backend)
+* Render (Frontend + Backend, using `npm ci` + `npm run build`)
 
 ---
 
