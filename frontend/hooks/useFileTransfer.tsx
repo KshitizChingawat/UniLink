@@ -34,7 +34,7 @@ export const useFileTransfer = () => {
   // Route medium and large files through the resumable chunk path so uploads
   // stay responsive on hosted environments instead of waiting on one big relay.
   const chunkSizeThreshold = 8 * 1024 * 1024;
-  const chunkUploadConcurrency = 2;
+  const chunkUploadConcurrency = 4;
   const chunkRetryLimit = 5;
   const chunkRequestTimeoutMs = 10 * 60 * 1000;
   const chunkRetryBaseDelayMs = 1_000;
