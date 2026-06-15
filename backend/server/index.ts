@@ -35,6 +35,16 @@ const supabaseOrigin = (() => {
   }
 })();
 
+const isTrustedProductionOrigin = (origin: string) => {
+  try {
+    const url = new URL(origin);
+    const hostname = url.hostname.toLowerCase();
+    return hostname.endsWith(".onrender.com") && hostname.includes("unilink");
+  } catch {
+    return false;
+  }
+};
+
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(httpLogger);
@@ -47,6 +57,11 @@ app.use(cors({
     }
 
     if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    if (isProduction && isTrustedProductionOrigin(origin)) {
       callback(null, true);
       return;
     }
