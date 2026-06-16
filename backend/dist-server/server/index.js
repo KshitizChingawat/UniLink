@@ -14,7 +14,7 @@ import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
 import { isEmailVerificationConfigured, isMailtrapDemoRestrictionError, sendRegistrationOtp } from "./mailer.js";
 import { clearAuthCookies, comparePassword, createCsrfToken, hashPassword, requireAuth, requireCsrf, revokeToken, sanitizeUser, setAuthCookies, signAuthToken } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
-import { containsNullBytes, ensureRelativeStoragePath, isZipBombCandidate, nowIso, sanitizeFilename, sanitizeMimeType, sanitizeTextInput } from "./helpers.js";
+import { ensureRelativeStoragePath, isZipBombCandidate, nowIso, sanitizeFilename, sanitizeMimeType, sanitizeTextInput } from "./helpers.js";
 import { createId, ensureDataDirs, loadDb, saveDb } from "./storage.js";
 import { appConfig } from "./config.js";
 import { createErrorHandler, rejectDisallowedOrigin } from "./http.js";
@@ -35,6 +35,16 @@ const supabaseOrigin = (() => {
         return null;
     }
 })();
+const isTrustedProductionOrigin = (origin) => {
+    try {
+        const url = new URL(origin);
+        const hostname = url.hostname.toLowerCase();
+        return hostname.endsWith(".onrender.com") && hostname.includes("unilink");
+    }
+    catch {
+        return false;
+    }
+};
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(httpLogger);
@@ -45,6 +55,10 @@ app.use(cors({
             return;
         }
         if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+            return;
+        }
+        if (isProduction && isTrustedProductionOrigin(origin)) {
             callback(null, true);
             return;
         }
@@ -119,17 +133,18 @@ const MAX_SINGLE_FILE_SIZE = appConfig.maxFileSizeBytes;
 const MAX_TOTAL_USER_STORAGE = 500 * 1024 * 1024;
 const MAX_ACTIVE_UPLOADS_PER_USER = 10;
 const MAX_FILES_PER_SELECTION = 10;
-const FREE_FILE_SIZE_LIMIT = MAX_SINGLE_FILE_SIZE;
-const PRO_FILE_SIZE_LIMIT = MAX_SINGLE_FILE_SIZE;
+const FREE_FILE_SIZE_LIMIT = Math.max(100 * 1024 * 1024, MAX_SINGLE_FILE_SIZE);
+const PRO_FILE_SIZE_LIMIT = Math.max(10 * 1024 * 1024 * 1024, MAX_SINGLE_FILE_SIZE);
 const MONTH_IN_MS = 30 * 24 * 60 * 60 * 1000;
 const OTP_FALLBACK_ENABLED = appConfig.allowOtpFallback;
 const DEMO_GOOGLE_LOGIN_ENABLED = !isProduction && appConfig.allowDemoGoogleLogin;
 const strictContentSecurityPolicyDirectives = {
     defaultSrc: ["'self'"],
     scriptSrc: ["'self'"],
-    styleSrc: ["'self'"],
-    imgSrc: ["'self'", "data:", "blob:"],
-    mediaSrc: ["'self'", "blob:"],
+    styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+    fontSrc: ["'self'", "https://fonts.gstatic.com"],
+    imgSrc: ["'self'", "data:", "blob:", "https://api.qrserver.com", ...(supabaseOrigin ? [supabaseOrigin] : [])],
+    mediaSrc: ["'self'", "blob:", ...(supabaseOrigin ? [supabaseOrigin] : [])],
     connectSrc: ["'self'", ...allowedOrigins, ...(supabaseOrigin ? [supabaseOrigin] : [])],
     objectSrc: ["'none'"],
     baseUri: ["'self'"],
@@ -245,7 +260,7 @@ const fileTransferSchema = z.object({
 });
 const uploadInitSchema = z.object({
     fileName: z.string().trim().min(1).max(180),
-    fileSize: z.coerce.number().int().positive().max(PRO_FILE_SIZE_LIMIT),
+    fileSize: z.coerce.number().int().nonnegative().max(PRO_FILE_SIZE_LIMIT),
     fileType: z.string().trim().max(120).optional(),
     senderDeviceId: z.string().trim().min(1),
     receiverDeviceId: z.string().trim().optional(),
@@ -454,9 +469,6 @@ const scanUploadedPayload = async (_fileName, _mimeType, _size) => {
     return { clean: true };
 };
 const validateUploadedFileBuffer = async (fileBuffer, declaredMimeType, declaredSize) => {
-    if (containsNullBytes(fileBuffer)) {
-        return "File payload contains invalid null bytes.";
-    }
     const detectedFileType = await fileTypeFromBuffer(fileBuffer);
     const effectiveMimeType = detectedFileType?.mime || declaredMimeType;
     if (!isAllowedMimeType(effectiveMimeType)) {
@@ -1320,7 +1332,8 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
     await cleanupStaleUploadSessions();
     const parsed = uploadInitSchema.safeParse(req.body);
     if (!parsed.success) {
-        res.status(400).json({ error: "Invalid upload metadata" });
+        const errorDetails = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join(", ");
+        res.status(400).json({ error: `Invalid upload metadata: ${errorDetails}` });
         return;
     }
     const db = await loadDb();
@@ -1587,6 +1600,7 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
             .upload(ensureRelativeStoragePath(session.storagePath), createReadStream(assembledPath), {
             contentType: sanitizeMimeType(session.fileType),
             upsert: false,
+            duplex: 'half'
         });
         if (uploadError) {
             console.error("Supabase Storage chunked upload error:", uploadError);
@@ -2193,7 +2207,20 @@ app.get("/api/receive/:sessionId", requireAuth, async (req, res) => {
         res.status(500).json({ error: "Internal server error" });
     }
 });
+// Serve the frontend build in production.  The build script copies
+// frontend/dist → root dist/ before compiling the backend.
+const FRONTEND_DIST = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/i, "$1")), "..", "..", "..", "dist");
+if (isProduction) {
+    app.use(express.static(FRONTEND_DIST, { index: "index.html", maxAge: "1d" }));
+}
 app.use(createErrorHandler());
+// SPA fallback — serve index.html for any non-API route so client-side
+// routing works when the user refreshes or deep-links.
+if (isProduction) {
+    app.get("*", (_req, res) => {
+        res.sendFile(path.join(FRONTEND_DIST, "index.html"));
+    });
+}
 let server = null;
 const shutdown = (signal) => {
     logger.warn({ signal }, "Graceful shutdown started");

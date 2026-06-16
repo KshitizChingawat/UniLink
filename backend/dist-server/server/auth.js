@@ -37,7 +37,12 @@ export const revokeToken = async (jti, reason = "manual") => {
         reason,
     });
     if (error && !error.message.toLowerCase().includes("duplicate")) {
-        throw new Error(`Failed to revoke token: ${error.message}`);
+        if (error.message.toLowerCase().includes("could not find the table")) {
+            console.warn("Table 'revoked_tokens' not found in Supabase. Falling back to in-memory token revocation.");
+        }
+        else {
+            throw new Error(`Failed to revoke token: ${error.message}`);
+        }
     }
 };
 export const isTokenRevoked = async (jti) => {
@@ -52,7 +57,9 @@ export const isTokenRevoked = async (jti) => {
             .eq("jti", jti)
             .maybeSingle();
         if (error) {
-            console.error(`Error verifying token revocation for jti ${jti}:`, error.message);
+            if (!error.message.toLowerCase().includes("could not find the table")) {
+                console.error(`Error verifying token revocation for jti ${jti}:`, error.message);
+            }
             return false;
         }
         const revoked = Boolean(data?.jti);
@@ -117,14 +124,14 @@ export const setAuthCookies = (res, token, csrfToken, rememberMe = false) => {
     const secure = appConfig.isProduction;
     res.cookie(authCookieName, token, {
         httpOnly: true,
-        sameSite: "strict",
+        sameSite: "lax",
         secure,
         maxAge: maxAgeMs,
         path: "/",
     });
     res.cookie(csrfCookieName, csrfToken, {
         httpOnly: false,
-        sameSite: "strict",
+        sameSite: "lax",
         secure,
         maxAge: maxAgeMs,
         path: "/",
@@ -132,8 +139,8 @@ export const setAuthCookies = (res, token, csrfToken, rememberMe = false) => {
 };
 export const clearAuthCookies = (res) => {
     const secure = appConfig.isProduction;
-    res.clearCookie(authCookieName, { httpOnly: true, sameSite: "strict", secure, path: "/" });
-    res.clearCookie(csrfCookieName, { httpOnly: false, sameSite: "strict", secure, path: "/" });
+    res.clearCookie(authCookieName, { httpOnly: true, sameSite: "lax", secure, path: "/" });
+    res.clearCookie(csrfCookieName, { httpOnly: false, sameSite: "lax", secure, path: "/" });
 };
 export const requireCsrf = (req, res, next) => {
     if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") {
