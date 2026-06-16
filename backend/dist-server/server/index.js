@@ -36,6 +36,17 @@ const supabaseOrigin = (() => {
         return null;
     }
 })();
+const supabaseStorageOrigin = (() => {
+    const raw = appConfig.supabaseUrl || "";
+    if (!raw)
+        return null;
+    try {
+        return new URL(raw.replace(".supabase.co", ".storage.supabase.co")).origin;
+    }
+    catch {
+        return null;
+    }
+})();
 const isTrustedProductionOrigin = (origin) => {
     try {
         const url = new URL(origin);
@@ -145,9 +156,9 @@ const strictContentSecurityPolicyDirectives = {
     scriptSrc: ["'self'"],
     styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
     fontSrc: ["'self'", "https://fonts.gstatic.com"],
-    imgSrc: ["'self'", "data:", "blob:", "https://api.qrserver.com", ...(supabaseOrigin ? [supabaseOrigin] : [])],
-    mediaSrc: ["'self'", "blob:", ...(supabaseOrigin ? [supabaseOrigin] : [])],
-    connectSrc: ["'self'", ...allowedOrigins, ...(supabaseOrigin ? [supabaseOrigin] : [])],
+    imgSrc: ["'self'", "data:", "blob:", "https://api.qrserver.com", ...(supabaseOrigin ? [supabaseOrigin] : []), ...(supabaseStorageOrigin ? [supabaseStorageOrigin] : [])],
+    mediaSrc: ["'self'", "blob:", ...(supabaseOrigin ? [supabaseOrigin] : []), ...(supabaseStorageOrigin ? [supabaseStorageOrigin] : [])],
+    connectSrc: ["'self'", ...allowedOrigins, ...(supabaseOrigin ? [supabaseOrigin] : []), ...(supabaseStorageOrigin ? [supabaseStorageOrigin] : [])],
     objectSrc: ["'none'"],
     baseUri: ["'self'"],
     frameAncestors: ["'none'"],
@@ -1416,7 +1427,7 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
         uploadedChunks: [],
         fileLimit: getUserFileLimit(user),
         message: "Chunk upload session ready.",
-        tusUrl: `${appConfig.supabaseUrl}/storage/v1/upload/resumable`,
+        tusUrl: `${appConfig.supabaseUrl.replace(".supabase.co", ".storage.supabase.co")}/storage/v1/upload/resumable`,
         tusToken: signedUploadData.token,
         supabaseAnonKey: process.env.SUPABASE_ANON_KEY || "",
         storagePath: storagePath,
@@ -1916,7 +1927,7 @@ const getTransferDownloadLink = async (userId, transferId, action = "download") 
     }
     return {
         transfer,
-        signedUrl: data.signedUrl,
+        signedUrl: data.signedUrl.replace(".supabase.co", ".storage.supabase.co"),
     };
 };
 app.get("/api/file-transfers/:id/download-link", fileListLimiter, requireAuth, async (req, res) => {
