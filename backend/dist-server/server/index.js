@@ -11,6 +11,7 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { z } from "zod";
 import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
+import * as tus from "tus-js-client";
 import { isEmailVerificationConfigured, isMailtrapDemoRestrictionError, sendRegistrationOtp } from "./mailer.js";
 import { clearAuthCookies, comparePassword, createCsrfToken, hashPassword, requireAuth, requireCsrf, revokeToken, sanitizeUser, setAuthCookies, signAuthToken } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
@@ -1603,17 +1604,34 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
                 session.isCompleting = false;
                 return;
             }
-            const { error: uploadError } = await supabase.storage
-                .from(FILE_BUCKET)
-                .upload(ensureRelativeStoragePath(session.storagePath), createReadStream(assembledPath), {
-                contentType: sanitizeMimeType(session.fileType),
-                upsert: false,
-                duplex: 'half'
+            const supabaseUploadUrl = `${appConfig.supabaseUrl}/storage/v1/upload/resumable`;
+            await new Promise((resolve, reject) => {
+                const upload = new tus.Upload(createReadStream(assembledPath), {
+                    endpoint: supabaseUploadUrl,
+                    retryDelays: [0, 3000, 5000, 10000, 20000],
+                    headers: {
+                        authorization: `Bearer ${appConfig.supabaseServiceRoleKey}`,
+                        'x-upsert': 'true',
+                    },
+                    uploadDataDuringCreation: true,
+                    removeFingerprintOnSuccess: true,
+                    metadata: {
+                        bucketName: FILE_BUCKET,
+                        objectName: ensureRelativeStoragePath(session.storagePath),
+                        contentType: sanitizeMimeType(session.fileType),
+                        cacheControl: '3600',
+                    },
+                    chunkSize: 6 * 1024 * 1024,
+                    onError: (error) => {
+                        console.error("TUS chunked upload error:", error);
+                        reject(error);
+                    },
+                    onSuccess: () => {
+                        resolve();
+                    },
+                });
+                upload.start();
             });
-            if (uploadError) {
-                console.error("Supabase Storage chunked upload error:", uploadError);
-                throw uploadError;
-            }
             const currentDb = await loadDb();
             const currentTransfer = currentDb.fileTransfers.find((entry) => entry.id === session.transferId && entry.userId === req.auth.userId);
             const transfer = currentTransfer || {
