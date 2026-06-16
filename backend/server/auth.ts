@@ -168,14 +168,14 @@ export const setAuthCookies = (res: Response, token: string, csrfToken: string, 
 
   res.cookie(authCookieName, token, {
     httpOnly: true,
-    sameSite: "strict",
+    sameSite: "lax",
     secure,
     maxAge: maxAgeMs,
     path: "/",
   });
   res.cookie(csrfCookieName, csrfToken, {
     httpOnly: false,
-    sameSite: "strict",
+    sameSite: "lax",
     secure,
     maxAge: maxAgeMs,
     path: "/",
@@ -184,8 +184,8 @@ export const setAuthCookies = (res: Response, token: string, csrfToken: string, 
 
 export const clearAuthCookies = (res: Response) => {
   const secure = appConfig.isProduction;
-  res.clearCookie(authCookieName, { httpOnly: true, sameSite: "strict", secure, path: "/" });
-  res.clearCookie(csrfCookieName, { httpOnly: false, sameSite: "strict", secure, path: "/" });
+  res.clearCookie(authCookieName, { httpOnly: true, sameSite: "lax", secure, path: "/" });
+  res.clearCookie(csrfCookieName, { httpOnly: false, sameSite: "lax", secure, path: "/" });
 };
 
 export const requireCsrf = (

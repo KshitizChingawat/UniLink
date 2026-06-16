@@ -145,9 +145,10 @@ const DEMO_GOOGLE_LOGIN_ENABLED = !isProduction && appConfig.allowDemoGoogleLogi
 const strictContentSecurityPolicyDirectives = {
   defaultSrc: ["'self'"],
   scriptSrc: ["'self'"],
-  styleSrc: ["'self'"],
-  imgSrc: ["'self'", "data:", "blob:"],
-  mediaSrc: ["'self'", "blob:"],
+  styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+  fontSrc: ["'self'", "https://fonts.gstatic.com"],
+  imgSrc: ["'self'", "data:", "blob:", "https://api.qrserver.com", ...(supabaseOrigin ? [supabaseOrigin] : [])],
+  mediaSrc: ["'self'", "blob:", ...(supabaseOrigin ? [supabaseOrigin] : [])],
   connectSrc: ["'self'", ...allowedOrigins, ...(supabaseOrigin ? [supabaseOrigin] : [])],
   objectSrc: ["'none'"],
   baseUri: ["'self'"],
@@ -2674,8 +2675,29 @@ app.get("/api/receive/:sessionId", requireAuth, async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+// Serve the frontend build in production.  The build script copies
+// frontend/dist → root dist/ before compiling the backend.
+const FRONTEND_DIST = path.resolve(
+  path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/i, "$1")),
+  "..",
+  "..",
+  "..",
+  "dist",
+);
+
+if (isProduction) {
+  app.use(express.static(FRONTEND_DIST, { index: "index.html", maxAge: "1d" }));
+}
 
 app.use(createErrorHandler());
+
+// SPA fallback — serve index.html for any non-API route so client-side
+// routing works when the user refreshes or deep-links.
+if (isProduction) {
+  app.get("*", (_req, res) => {
+    res.sendFile(path.join(FRONTEND_DIST, "index.html"));
+  });
+}
 
 let server: ReturnType<typeof app.listen> | null = null;
 

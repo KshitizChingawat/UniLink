@@ -39,15 +39,22 @@ export const rejectDisallowedOrigin: RequestHandler = (req, _res, next) => {
 
   const origin = req.headers.origin;
   if (!origin) {
+    // Same-origin requests (no Origin header) are always allowed
     next();
     return;
   }
 
+  // If the CORS middleware already validated this origin, allow it through.
+  // The CORS origin callback runs before this middleware, so if we reach here
+  // with a valid origin header, CORS has already approved it.
   const host = req.headers.host;
   const referer = req.headers.referer;
   if (referer && host) {
     try {
       const refererUrl = new URL(referer);
+      // Allow when the referer host matches the request host (same-origin),
+      // OR when the referer origin matches the declared Origin header
+      // (cross-origin but consistent — CORS already validated the origin).
       if (refererUrl.host !== host && refererUrl.origin !== origin) {
         next(new HttpError(403, "Cross-origin state mutation blocked"));
         return;
