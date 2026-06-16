@@ -580,6 +580,7 @@ export const useFileTransfer = () => {
         rekeyUploadTracking(uploadId, init.transferId);
         uploadId = init.transferId;
         uploadSessionIds.current[uploadId] = sessionUploadId;
+        const anonKey = init.supabaseAnonKey;
         await uploadLargeFileInChunks(uploadId, sessionUploadId, init.chunkSize, init.totalChunks, file, token, apiBaseUrl, init.uploadedChunks || [], init.tusUrl, init.tusToken, init.storagePath, anonKey);
 
         setUploadProgress((current) => ({
