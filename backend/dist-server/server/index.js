@@ -323,7 +323,7 @@ const uploadChunkHeadersSchema = z.object({
     "x-total-chunks": z.coerce.number().int().min(1),
 });
 const uploadSessions = new Map();
-const LARGE_UPLOAD_CHUNK_BYTES = 50 * 1024 * 1024;
+const LARGE_UPLOAD_CHUNK_BYTES = 6 * 1024 * 1024;
 const UPLOAD_TEMP_ROOT = path.join(os.tmpdir(), "unilink-upload-sessions");
 const UPLOAD_SESSION_STALE_MS = 30 * 60 * 1000;
 const UPLOAD_REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
@@ -1427,7 +1427,7 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
         uploadedChunks: [],
         fileLimit: getUserFileLimit(user),
         message: "Chunk upload session ready.",
-        tusUrl: `${appConfig.supabaseUrl.replace(".supabase.co", ".storage.supabase.co")}/storage/v1/upload/resumable`,
+        tusUrl: `${appConfig.supabaseUrl}/storage/v1/upload/resumable`,
         tusToken: signedUploadData.token,
         supabaseAnonKey: process.env.SUPABASE_ANON_KEY || "",
         storagePath: storagePath,
@@ -1927,7 +1927,7 @@ const getTransferDownloadLink = async (userId, transferId, action = "download") 
     }
     return {
         transfer,
-        signedUrl: data.signedUrl.replace(".supabase.co", ".storage.supabase.co"),
+        signedUrl: data.signedUrl,
     };
 };
 app.get("/api/file-transfers/:id/download-link", fileListLimiter, requireAuth, async (req, res) => {
