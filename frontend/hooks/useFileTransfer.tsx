@@ -239,7 +239,8 @@ export const useFileTransfer = () => {
     uploadedChunks: number[] = [],
     tusUrl?: string,
     tusToken?: string,
-    storagePath?: string
+    storagePath?: string,
+    anonKey?: string
   ) => {
     const uploadedChunkSet = new Set(uploadedChunks);
     let uploadFailed = false;
@@ -258,7 +259,8 @@ export const useFileTransfer = () => {
           endpoint: tusUrl,
           retryDelays: [0, 3000, 5000, 10000, 20000],
           headers: {
-            'x-signature': tusToken
+            'x-signature': tusToken,
+            ...(anonKey ? { apikey: anonKey } : {})
           },
           metadata: {
             bucketName: 'unilink-files',
@@ -539,6 +541,7 @@ export const useFileTransfer = () => {
               tusUrl?: string;
               tusToken?: string;
               storagePath?: string;
+              supabaseAnonKey?: string;
             }>(`/api/file-transfers/upload-status/${sessionUploadId}`);
             rekeyUploadTracking(uploadId, init.transferId);
             uploadId = init.transferId;
@@ -557,6 +560,7 @@ export const useFileTransfer = () => {
             tusUrl?: string;
             tusToken?: string;
             storagePath?: string;
+            supabaseAnonKey?: string;
           }>('/api/file-transfers/initiate', {
             method: 'POST',
             body: JSON.stringify({
@@ -576,7 +580,7 @@ export const useFileTransfer = () => {
         rekeyUploadTracking(uploadId, init.transferId);
         uploadId = init.transferId;
         uploadSessionIds.current[uploadId] = sessionUploadId;
-        await uploadLargeFileInChunks(uploadId, sessionUploadId, init.chunkSize, init.totalChunks, file, token, apiBaseUrl, init.uploadedChunks || [], init.tusUrl, init.tusToken, init.storagePath);
+        await uploadLargeFileInChunks(uploadId, sessionUploadId, init.chunkSize, init.totalChunks, file, token, apiBaseUrl, init.uploadedChunks || [], init.tusUrl, init.tusToken, init.storagePath, anonKey);
 
         setUploadProgress((current) => ({
           ...current,

@@ -1418,6 +1418,7 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
         message: "Chunk upload session ready.",
         tusUrl: `${appConfig.supabaseUrl}/storage/v1/upload/resumable`,
         tusToken: signedUploadData.token,
+        supabaseAnonKey: process.env.SUPABASE_ANON_KEY || "",
         storagePath: storagePath,
     });
 });
@@ -2185,10 +2186,11 @@ app.delete("/api/file-transfers/:id", syncLimiter, requireAuth, requireCsrf, asy
     const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const transfer = getOwnedTransfer(db, req.auth.userId, transferId);
     if (transfer?.filePath) {
-        // Remove from Supabase Storage (fire-and-forget, do not block the response)
-        supabase.storage.from(FILE_BUCKET).remove([ensureRelativeStoragePath(transfer.filePath)]).catch((err) => {
-            console.error("Supabase Storage delete error:", err);
-        });
+        // Remove from Supabase Storage
+        const { error: removeError } = await supabase.storage.from(FILE_BUCKET).remove([ensureRelativeStoragePath(transfer.filePath)]);
+        if (removeError) {
+            console.error("Supabase Storage delete error:", removeError);
+        }
     }
     db.fileTransfers = db.fileTransfers.filter((entry) => !(entry.id === req.params.id && entry.userId === req.auth.userId));
     await saveDb(db);
