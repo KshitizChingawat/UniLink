@@ -585,10 +585,6 @@ const validateUploadedFileBuffer = async (
   declaredMimeType: string,
   declaredSize: number,
 ) => {
-  if (containsNullBytes(fileBuffer)) {
-    return "File payload contains invalid null bytes.";
-  }
-
   const detectedFileType = await fileTypeFromBuffer(fileBuffer);
   const effectiveMimeType = detectedFileType?.mime || declaredMimeType;
 
@@ -1946,6 +1942,7 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
       .upload(ensureRelativeStoragePath(session.storagePath), createReadStream(assembledPath) as unknown as File, {
         contentType: sanitizeMimeType(session.fileType),
         upsert: false,
+        duplex: 'half'
       });
 
     if (uploadError) {
