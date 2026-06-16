@@ -167,7 +167,7 @@ const FileTransferPage = () => {
   const openPreview = async (transfer: any) => {
     try {
       const fileType = String(getTransferField(transfer, 'fileType') || '');
-      const preview = await apiFetch<{ signedUrl: string; fileName: string }>(`/api/file-transfers/${transfer.id}/download-link`);
+      const preview = await apiFetch<{ signedUrl: string; fileName: string }>(`/api/file-transfers/${transfer.id}/download-link?action=preview`);
       setPreviewUrl(preview.signedUrl);
       setPreviewName(getTransferField(transfer, 'fileName') || preview.fileName || 'Preview');
       setPreviewTransferId(transfer.id);

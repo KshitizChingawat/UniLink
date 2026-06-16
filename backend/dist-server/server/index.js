@@ -1416,8 +1416,9 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
         uploadedChunks: [],
         fileLimit: getUserFileLimit(user),
         message: "Chunk upload session ready.",
-        tusUrl: signedUploadData.signedUrl,
+        tusUrl: `${appConfig.supabaseUrl}/storage/v1/upload/resumable`,
         tusToken: signedUploadData.token,
+        storagePath: storagePath,
     });
 });
 app.get("/api/file-transfers/upload-status/:uploadId", fileListLimiter, requireAuth, async (req, res) => {
@@ -1899,7 +1900,7 @@ app.patch("/api/file-transfers/:id", syncLimiter, requireAuth, requireCsrf, asyn
     await saveDb(db);
     res.json(transfer);
 });
-const getTransferDownloadLink = async (userId, transferId) => {
+const getTransferDownloadLink = async (userId, transferId, action = "download") => {
     const db = await loadDb();
     const transfer = getOwnedTransfer(db, userId, transferId);
     if (!transfer?.filePath) {
@@ -1907,9 +1908,7 @@ const getTransferDownloadLink = async (userId, transferId) => {
     }
     const { data, error } = await supabase.storage
         .from(FILE_BUCKET)
-        .createSignedUrl(ensureRelativeStoragePath(transfer.filePath), 60 * 5, {
-        download: transfer.fileName,
-    });
+        .createSignedUrl(ensureRelativeStoragePath(transfer.filePath), 60 * 5, action === "download" ? { download: transfer.fileName } : undefined);
     if (error || !data?.signedUrl) {
         console.error("Supabase signed URL error:", error);
         return { error: "Could not generate download link" };
@@ -1921,7 +1920,8 @@ const getTransferDownloadLink = async (userId, transferId) => {
 };
 app.get("/api/file-transfers/:id/download-link", fileListLimiter, requireAuth, async (req, res) => {
     const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const result = await getTransferDownloadLink(req.auth.userId, transferId);
+    const action = req.query.action === "preview" ? "preview" : "download";
+    const result = await getTransferDownloadLink(req.auth.userId, transferId, action);
     if ("error" in result) {
         res.status(result.error === "File not found" ? 404 : 500).json({ error: result.error });
         return;

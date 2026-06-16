@@ -1723,8 +1723,9 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
     uploadedChunks: [],
     fileLimit: getUserFileLimit(user),
     message: "Chunk upload session ready.",
-    tusUrl: signedUploadData.signedUrl,
+    tusUrl: `${appConfig.supabaseUrl}/storage/v1/upload/resumable`,
     tusToken: signedUploadData.token,
+    storagePath: storagePath,
   });
 });
 
@@ -2306,7 +2307,7 @@ app.patch("/api/file-transfers/:id", syncLimiter, requireAuth, requireCsrf, asyn
   res.json(transfer);
 });
 
-const getTransferDownloadLink = async (userId: string, transferId: string) => {
+const getTransferDownloadLink = async (userId: string, transferId: string, action: "download" | "preview" = "download") => {
   const db = await loadDb();
   const transfer = getOwnedTransfer(db, userId, transferId);
   if (!transfer?.filePath) {
@@ -2315,9 +2316,9 @@ const getTransferDownloadLink = async (userId: string, transferId: string) => {
 
   const { data, error } = await supabase.storage
     .from(FILE_BUCKET)
-    .createSignedUrl(ensureRelativeStoragePath(transfer.filePath), 60 * 5, {
-      download: transfer.fileName,
-    });
+    .createSignedUrl(ensureRelativeStoragePath(transfer.filePath), 60 * 5, 
+      action === "download" ? { download: transfer.fileName } : undefined
+    );
 
   if (error || !data?.signedUrl) {
     console.error("Supabase signed URL error:", error);
@@ -2332,7 +2333,8 @@ const getTransferDownloadLink = async (userId: string, transferId: string) => {
 
 app.get("/api/file-transfers/:id/download-link", fileListLimiter, requireAuth, async (req: AuthenticatedRequest, res) => {
   const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-  const result = await getTransferDownloadLink(req.auth!.userId, transferId);
+  const action = req.query.action === "preview" ? "preview" : "download";
+  const result = await getTransferDownloadLink(req.auth!.userId, transferId, action);
   if ("error" in result) {
     res.status(result.error === "File not found" ? 404 : 500).json({ error: result.error });
     return;

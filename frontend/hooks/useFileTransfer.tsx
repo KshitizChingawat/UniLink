@@ -238,7 +238,8 @@ export const useFileTransfer = () => {
     apiBaseUrl: string,
     uploadedChunks: number[] = [],
     tusUrl?: string,
-    tusToken?: string
+    tusToken?: string,
+    storagePath?: string
   ) => {
     const uploadedChunkSet = new Set(uploadedChunks);
     let uploadFailed = false;
@@ -258,6 +259,11 @@ export const useFileTransfer = () => {
           retryDelays: [0, 3000, 5000, 10000, 20000],
           headers: {
             authorization: `Bearer ${tusToken}`
+          },
+          metadata: {
+            bucketName: 'unilink-files',
+            objectName: storagePath || '',
+            contentType: file.type || 'application/octet-stream',
           },
           uploadDataDuringCreation: true,
           removeFingerprintOnSuccess: true,
@@ -532,6 +538,7 @@ export const useFileTransfer = () => {
               uploadedChunks: number[];
               tusUrl?: string;
               tusToken?: string;
+              storagePath?: string;
             }>(`/api/file-transfers/upload-status/${sessionUploadId}`);
             rekeyUploadTracking(uploadId, init.transferId);
             uploadId = init.transferId;
@@ -549,6 +556,7 @@ export const useFileTransfer = () => {
             transferId: string;
             tusUrl?: string;
             tusToken?: string;
+            storagePath?: string;
           }>('/api/file-transfers/initiate', {
             method: 'POST',
             body: JSON.stringify({
@@ -568,7 +576,7 @@ export const useFileTransfer = () => {
         rekeyUploadTracking(uploadId, init.transferId);
         uploadId = init.transferId;
         uploadSessionIds.current[uploadId] = sessionUploadId;
-        await uploadLargeFileInChunks(uploadId, sessionUploadId, init.chunkSize, init.totalChunks, file, token, apiBaseUrl, init.uploadedChunks || []);
+        await uploadLargeFileInChunks(uploadId, sessionUploadId, init.chunkSize, init.totalChunks, file, token, apiBaseUrl, init.uploadedChunks || [], init.tusUrl, init.tusToken, init.storagePath);
 
         setUploadProgress((current) => ({
           ...current,
@@ -786,21 +794,13 @@ export const useFileTransfer = () => {
 
     try {
       const data = await apiFetch<{ signedUrl: string; fileName: string }>(`/api/file-transfers/${transferId}/download-link`);
-      const response = await fetch(data.signedUrl);
-      if (!response.ok) {
-        throw new Error('Failed to fetch download payload');
-      }
-
-      const blob = await response.blob();
-      const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.style.display = 'none';
-      a.href = objectUrl;
+      a.href = data.signedUrl;
       a.download = data.fileName || fileName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
 
       toast.success('File download started');
     } catch (err) {
