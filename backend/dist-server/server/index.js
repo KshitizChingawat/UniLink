@@ -1365,6 +1365,14 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
     const storagePath = ensureRelativeStoragePath(`${req.auth.userId}/${randomUUID()}-${sanitizedFileName}`);
     const tempDir = path.join(UPLOAD_TEMP_ROOT, uploadId);
     await mkdir(tempDir, { recursive: true });
+    const { data: signedUploadData, error: signedUploadError } = await supabase.storage
+        .from(FILE_BUCKET)
+        .createSignedUploadUrl(storagePath);
+    if (signedUploadError || !signedUploadData) {
+        console.error("Failed to generate signed upload URL:", signedUploadError);
+        res.status(500).json({ error: "Failed to initialize secure upload channel." });
+        return;
+    }
     const session = {
         id: uploadId,
         userId: req.auth.userId,
@@ -1382,6 +1390,7 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
         createdAt: nowIso(),
         updatedAt: nowIso(),
         uploadedChunks: new Set(),
+        isDirectUpload: true,
     };
     uploadSessions.set(uploadId, session);
     const transfer = {
@@ -1407,6 +1416,8 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
         uploadedChunks: [],
         fileLimit: getUserFileLimit(user),
         message: "Chunk upload session ready.",
+        tusUrl: signedUploadData.signedUrl,
+        tusToken: signedUploadData.token,
     });
 });
 app.get("/api/file-transfers/upload-status/:uploadId", fileListLimiter, requireAuth, async (req, res) => {
@@ -1577,61 +1588,63 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
     });
     (async () => {
         try {
-            const uploadedChunkIndices = await getUploadedChunkIndices(session);
-            if (uploadedChunkIndices.length !== session.totalChunks) {
-                session.isCompleting = false;
-                return;
-            }
-            const assembledPath = path.join(session.tempDir, "assembled-upload.bin");
-            await new Promise((resolve, reject) => {
-                const output = createWriteStream(assembledPath);
-                const appendNext = (index) => {
-                    if (index >= uploadedChunkIndices.length) {
-                        output.end();
-                        return;
-                    }
-                    const input = createReadStream(getUploadChunkPath(session, uploadedChunkIndices[index]));
-                    input.on("error", reject);
-                    input.on("end", () => appendNext(index + 1));
-                    input.pipe(output, { end: false });
-                };
-                output.on("finish", resolve);
-                output.on("error", reject);
-                appendNext(0);
-            });
-            const scanResult = await scanUploadedPayload(session.fileName, sanitizeMimeType(session.fileType), session.fileSize);
-            if (!scanResult.clean) {
-                session.isCompleting = false;
-                return;
-            }
-            const supabaseUploadUrl = `${appConfig.supabaseUrl}/storage/v1/upload/resumable`;
-            await new Promise((resolve, reject) => {
-                const upload = new tus.Upload(createReadStream(assembledPath), {
-                    endpoint: supabaseUploadUrl,
-                    retryDelays: [0, 3000, 5000, 10000, 20000],
-                    headers: {
-                        authorization: `Bearer ${appConfig.supabaseServiceRoleKey}`,
-                        'x-upsert': 'true',
-                    },
-                    uploadDataDuringCreation: true,
-                    removeFingerprintOnSuccess: true,
-                    metadata: {
-                        bucketName: FILE_BUCKET,
-                        objectName: ensureRelativeStoragePath(session.storagePath),
-                        contentType: sanitizeMimeType(session.fileType),
-                        cacheControl: '3600',
-                    },
-                    chunkSize: 6 * 1024 * 1024,
-                    onError: (error) => {
-                        console.error("TUS chunked upload error:", error);
-                        reject(error);
-                    },
-                    onSuccess: () => {
-                        resolve();
-                    },
+            if (!session.isDirectUpload) {
+                const uploadedChunkIndices = await getUploadedChunkIndices(session);
+                if (uploadedChunkIndices.length !== session.totalChunks) {
+                    session.isCompleting = false;
+                    return;
+                }
+                const assembledPath = path.join(session.tempDir, "assembled-upload.bin");
+                await new Promise((resolve, reject) => {
+                    const output = createWriteStream(assembledPath);
+                    const appendNext = (index) => {
+                        if (index >= uploadedChunkIndices.length) {
+                            output.end();
+                            return;
+                        }
+                        const input = createReadStream(getUploadChunkPath(session, uploadedChunkIndices[index]));
+                        input.on("error", reject);
+                        input.on("end", () => appendNext(index + 1));
+                        input.pipe(output, { end: false });
+                    };
+                    output.on("finish", resolve);
+                    output.on("error", reject);
+                    appendNext(0);
                 });
-                upload.start();
-            });
+                const scanResult = await scanUploadedPayload(session.fileName, sanitizeMimeType(session.fileType), session.fileSize);
+                if (!scanResult.clean) {
+                    session.isCompleting = false;
+                    return;
+                }
+                const supabaseUploadUrl = `${appConfig.supabaseUrl}/storage/v1/upload/resumable`;
+                await new Promise((resolve, reject) => {
+                    const upload = new tus.Upload(createReadStream(assembledPath), {
+                        endpoint: supabaseUploadUrl,
+                        retryDelays: [0, 3000, 5000, 10000, 20000],
+                        headers: {
+                            authorization: `Bearer ${appConfig.supabaseServiceRoleKey}`,
+                            'x-upsert': 'true',
+                        },
+                        uploadDataDuringCreation: true,
+                        removeFingerprintOnSuccess: true,
+                        metadata: {
+                            bucketName: FILE_BUCKET,
+                            objectName: ensureRelativeStoragePath(session.storagePath),
+                            contentType: sanitizeMimeType(session.fileType),
+                            cacheControl: '3600',
+                        },
+                        chunkSize: 6 * 1024 * 1024,
+                        onError: (error) => {
+                            console.error("TUS chunked upload error:", error);
+                            reject(error);
+                        },
+                        onSuccess: () => {
+                            resolve();
+                        },
+                    });
+                    upload.start();
+                });
+            }
             const currentDb = await loadDb();
             const currentTransfer = currentDb.fileTransfers.find((entry) => entry.id === session.transferId && entry.userId === req.auth.userId);
             const transfer = currentTransfer || {

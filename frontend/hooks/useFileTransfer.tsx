@@ -3,6 +3,7 @@ import { useAuth } from './useAuth';
 import { toast } from 'sonner';
 import { apiFetch, ApiError, getApiUrl, resolveApiBaseUrl } from '@/lib/api';
 import { getBrowserDeviceName, isGenericDeviceName } from '@/lib/device-display';
+import * as tus from 'tus-js-client';
 
 let cachedTransfers: FileTransfer[] = [];
 let cachedTransfersUserId: string | null = null;
@@ -235,7 +236,9 @@ export const useFileTransfer = () => {
     file: File,
     authToken: string,
     apiBaseUrl: string,
-    uploadedChunks: number[] = []
+    uploadedChunks: number[] = [],
+    tusUrl?: string,
+    tusToken?: string
   ) => {
     const uploadedChunkSet = new Set(uploadedChunks);
     let uploadFailed = false;
@@ -246,6 +249,48 @@ export const useFileTransfer = () => {
     }, 0);
     const activeChunkProgress: Record<number, number> = {};
     updateUploadProgress(uploadId, file.size, completedChunkBytes, activeChunkProgress);
+
+    if (tusUrl && tusToken) {
+      return new Promise<void>((resolve, reject) => {
+        let isAborted = false;
+        const upload = new tus.Upload(file, {
+          endpoint: tusUrl,
+          retryDelays: [0, 3000, 5000, 10000, 20000],
+          headers: {
+            authorization: `Bearer ${tusToken}`
+          },
+          uploadDataDuringCreation: true,
+          removeFingerprintOnSuccess: true,
+          chunkSize: chunkSize,
+          onError: (error) => {
+            console.error("TUS direct upload failed:", error);
+            if (!isAborted) reject(error);
+          },
+          onProgress: (bytesUploaded, bytesTotal) => {
+            if (isAborted) return;
+            const percent = Math.min(98, Math.round((bytesUploaded / bytesTotal) * 100));
+            setUploadProgress((current) => ({ ...current, [uploadId]: percent }));
+          },
+          onSuccess: () => {
+            if (isAborted) return;
+            setUploadProgress((current) => ({ ...current, [uploadId]: 98 }));
+            resolve();
+          }
+        });
+        
+        // Mock XHR to support cancellation
+        const mockXhr = {
+          abort: () => {
+            isAborted = true;
+            upload.abort(true);
+            reject(new Error("Upload aborted"));
+          }
+        } as unknown as XMLHttpRequest;
+        
+        registerActiveUpload(uploadId, mockXhr);
+        upload.start();
+      });
+    }
 
     const missingChunkIndices = Array.from({ length: totalChunks }, (_, index) => index).filter(
       (index) => !uploadedChunkSet.has(index),
@@ -485,6 +530,8 @@ export const useFileTransfer = () => {
               chunkSize: number;
               totalChunks: number;
               uploadedChunks: number[];
+              tusUrl?: string;
+              tusToken?: string;
             }>(`/api/file-transfers/upload-status/${sessionUploadId}`);
             rekeyUploadTracking(uploadId, init.transferId);
             uploadId = init.transferId;
@@ -500,6 +547,8 @@ export const useFileTransfer = () => {
             totalChunks: number;
             uploadedChunks: number[];
             transferId: string;
+            tusUrl?: string;
+            tusToken?: string;
           }>('/api/file-transfers/initiate', {
             method: 'POST',
             body: JSON.stringify({
