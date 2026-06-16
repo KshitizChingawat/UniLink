@@ -76,7 +76,11 @@ export const revokeToken = async (jti: string, reason = "manual") => {
   });
 
   if (error && !error.message.toLowerCase().includes("duplicate")) {
-    throw new Error(`Failed to revoke token: ${error.message}`);
+    if (error.message.toLowerCase().includes("could not find the table")) {
+      console.warn("Table 'revoked_tokens' not found in Supabase. Falling back to in-memory token revocation.");
+    } else {
+      throw new Error(`Failed to revoke token: ${error.message}`);
+    }
   }
 };
 
@@ -94,7 +98,9 @@ export const isTokenRevoked = async (jti: string) => {
       .maybeSingle();
 
     if (error) {
-      console.error(`Error verifying token revocation for jti ${jti}:`, error.message);
+      if (!error.message.toLowerCase().includes("could not find the table")) {
+        console.error(`Error verifying token revocation for jti ${jti}:`, error.message);
+      }
       return false;
     }
 
