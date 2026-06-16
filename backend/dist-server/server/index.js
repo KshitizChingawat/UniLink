@@ -1416,7 +1416,7 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
         uploadedChunks: [],
         fileLimit: getUserFileLimit(user),
         message: "Chunk upload session ready.",
-        tusUrl: `${appConfig.supabaseUrl}/storage/v1/upload/resumable`,
+        tusUrl: signedUploadData.signedUrl,
         tusToken: signedUploadData.token,
         storagePath: storagePath,
     });
