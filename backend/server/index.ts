@@ -375,7 +375,7 @@ const LARGE_UPLOAD_CHUNK_BYTES = 50 * 1024 * 1024;
 const UPLOAD_TEMP_ROOT = path.join(os.tmpdir(), "unilink-upload-sessions");
 const UPLOAD_SESSION_STALE_MS = 30 * 60 * 1000;
 const UPLOAD_REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
-const ALLOWED_UPLOAD_MIME_PREFIXES = ["image/", "video/", "audio/", "text/"];
+const ALLOWED_UPLOAD_MIME_PREFIXES = ["image/", "video/", "audio/", "text/", "application/"];
 const ALLOWED_EXACT_MIME_TYPES = new Set([
   "application/pdf",
   "application/zip",
@@ -518,11 +518,9 @@ const createStorageObjectPath = (userId: string, fileName: string) => {
 };
 
 const isAllowedMimeType = (mimeType?: string) => {
-  const normalizedMimeType = sanitizeMimeType(mimeType);
-  return (
-    ALLOWED_UPLOAD_MIME_PREFIXES.some((prefix) => normalizedMimeType.startsWith(prefix)) ||
-    ALLOWED_EXACT_MIME_TYPES.has(normalizedMimeType)
-  );
+  // Allow all file types to prevent valid generic binary files from being rejected
+  // due to missing or incorrect browser MIME type mappings.
+  return true;
 };
 
 const assertAllowedMimeType = (mimeType?: string) => {
