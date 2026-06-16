@@ -137,8 +137,8 @@ const MAX_SINGLE_FILE_SIZE = appConfig.maxFileSizeBytes;
 const MAX_TOTAL_USER_STORAGE = 500 * 1024 * 1024;
 const MAX_ACTIVE_UPLOADS_PER_USER = 10;
 const MAX_FILES_PER_SELECTION = 10;
-const FREE_FILE_SIZE_LIMIT = MAX_SINGLE_FILE_SIZE;
-const PRO_FILE_SIZE_LIMIT = MAX_SINGLE_FILE_SIZE;
+const FREE_FILE_SIZE_LIMIT = Math.max(100 * 1024 * 1024, MAX_SINGLE_FILE_SIZE);
+const PRO_FILE_SIZE_LIMIT = Math.max(10 * 1024 * 1024 * 1024, MAX_SINGLE_FILE_SIZE);
 const MONTH_IN_MS = 30 * 24 * 60 * 60 * 1000;
 const OTP_FALLBACK_ENABLED = appConfig.allowOtpFallback;
 const DEMO_GOOGLE_LOGIN_ENABLED = !isProduction && appConfig.allowDemoGoogleLogin;
@@ -280,7 +280,7 @@ const fileTransferSchema = z.object({
 
 const uploadInitSchema = z.object({
   fileName: z.string().trim().min(1).max(180),
-  fileSize: z.coerce.number().int().positive().max(PRO_FILE_SIZE_LIMIT),
+  fileSize: z.coerce.number().int().nonnegative().max(PRO_FILE_SIZE_LIMIT),
   fileType: z.string().trim().max(120).optional(),
   senderDeviceId: z.string().trim().min(1),
   receiverDeviceId: z.string().trim().optional(),
