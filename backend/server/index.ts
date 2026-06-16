@@ -1617,7 +1617,8 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
   await cleanupStaleUploadSessions();
   const parsed = uploadInitSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: "Invalid upload metadata" });
+    const errorDetails = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join(", ");
+    res.status(400).json({ error: `Invalid upload metadata: ${errorDetails}` });
     return;
   }
 
