@@ -130,7 +130,8 @@ const uploadLimiter = rateLimit({
     message: { error: "Too many upload requests. Please wait before uploading again." },
 });
 const MAX_SINGLE_FILE_SIZE = appConfig.maxFileSizeBytes;
-const MAX_TOTAL_USER_STORAGE = 500 * 1024 * 1024;
+const FREE_TOTAL_USER_STORAGE = 500 * 1024 * 1024;
+const PRO_TOTAL_USER_STORAGE = 100 * 1024 * 1024 * 1024;
 const MAX_ACTIVE_UPLOADS_PER_USER = 10;
 const MAX_FILES_PER_SELECTION = 10;
 const FREE_FILE_SIZE_LIMIT = Math.max(100 * 1024 * 1024, MAX_SINGLE_FILE_SIZE);
@@ -387,6 +388,7 @@ const refreshUserPlan = (user) => {
     return false;
 };
 const getUserFileLimit = (user) => isSubscriptionActive(user) ? PRO_FILE_SIZE_LIMIT : FREE_FILE_SIZE_LIMIT;
+const getUserTotalStorageLimit = (user) => isSubscriptionActive(user) ? PRO_TOTAL_USER_STORAGE : FREE_TOTAL_USER_STORAGE;
 const FREE_CLIPBOARD_WORD_LIMIT = 100;
 const PRO_CLIPBOARD_WORD_LIMIT = 5000;
 const FREE_CLIPBOARD_MESSAGE_LIMIT = 10;
@@ -449,10 +451,11 @@ const assertUploadConstraints = (db, user, fileName, fileSize, fileType) => {
         };
     }
     const projectedUsage = calculateUserStorageUsage(db, user.id) + fileSize;
-    if (projectedUsage > MAX_TOTAL_USER_STORAGE) {
+    const totalStorageLimit = getUserTotalStorageLimit(user);
+    if (projectedUsage > totalStorageLimit) {
         return {
             status: 413,
-            error: `Storage quota exceeded. UniLink currently allows up to ${bytesToLabel(MAX_TOTAL_USER_STORAGE)} total data per account.`,
+            error: `Storage quota exceeded. Your plan currently allows up to ${bytesToLabel(totalStorageLimit)} total data per account.`,
         };
     }
     if (getActiveUploadCountForUser(user.id) >= MAX_ACTIVE_UPLOADS_PER_USER) {
