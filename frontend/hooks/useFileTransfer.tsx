@@ -46,6 +46,7 @@ export const useFileTransfer = () => {
   const chunkRetryLimit = 5;
   const chunkRequestTimeoutMs = 10 * 60 * 1000;
   const chunkRetryBaseDelayMs = 1_000;
+  const maxTusChunkSize = 5 * 1024 * 1024;
   const processingPollIntervalMs = 2_500;
   const processingPollLimit = 120;
   const csrfToken = getCookieValue('unilink_csrf');
@@ -289,9 +290,11 @@ export const useFileTransfer = () => {
             objectName: storagePath || '',
             contentType: file.type || 'application/octet-stream',
           },
-          uploadDataDuringCreation: true,
+          // Create the resumable upload first, then stream bytes in PATCH
+          // requests so Supabase does not reject the initial POST as oversized.
+          uploadDataDuringCreation: false,
           removeFingerprintOnSuccess: true,
-          chunkSize: chunkSize,
+          chunkSize: Math.min(chunkSize, maxTusChunkSize),
           onError: (error) => {
             console.error("TUS direct upload failed:", error);
             if (!isAborted) reject(error);

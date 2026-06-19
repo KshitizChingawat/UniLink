@@ -5,13 +5,12 @@ import rateLimit from "express-rate-limit";
 import { fileTypeFromBuffer } from "file-type";
 import { randomInt, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, readdir, rm } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
 import { z } from "zod";
 import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
-import * as tus from "tus-js-client";
 import { isEmailVerificationConfigured, isMailtrapDemoRestrictionError, sendRegistrationOtp } from "./mailer.js";
 import { clearAuthCookies, comparePassword, createCsrfToken, hashPassword, requireAuth, requireCsrf, revokeToken, sanitizeUser, setAuthCookies, signAuthToken, signScopedToken, type AuthenticatedRequest } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
@@ -371,7 +370,7 @@ interface PendingUploadSession {
 }
 
 const uploadSessions = new Map<string, PendingUploadSession>();
-const LARGE_UPLOAD_CHUNK_BYTES = 6 * 1024 * 1024;
+const LARGE_UPLOAD_CHUNK_BYTES = 5 * 1024 * 1024;
 const UPLOAD_TEMP_ROOT = path.join(os.tmpdir(), "unilink-upload-sessions");
 const UPLOAD_SESSION_STALE_MS = 30 * 60 * 1000;
 const UPLOAD_REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
@@ -1684,16 +1683,6 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
   const tempDir = path.join(UPLOAD_TEMP_ROOT, uploadId);
   await mkdir(tempDir, { recursive: true });
 
-  const { data: signedUploadData, error: signedUploadError } = await supabase.storage
-    .from(FILE_BUCKET)
-    .createSignedUploadUrl(storagePath);
-
-  if (signedUploadError || !signedUploadData) {
-    console.error("Failed to generate signed upload URL:", signedUploadError);
-    res.status(500).json({ error: "Failed to initialize secure upload channel." });
-    return;
-  }
-
   const session: PendingUploadSession = {
     id: uploadId,
     userId: req.auth!.userId,
@@ -1711,7 +1700,7 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
     createdAt: nowIso(),
     updatedAt: nowIso(),
     uploadedChunks: new Set<number>(),
-    isDirectUpload: true,
+    isDirectUpload: false,
   };
 
   uploadSessions.set(uploadId, session);
@@ -1741,9 +1730,6 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
     uploadedChunks: [],
     fileLimit: getUserFileLimit(user),
     message: "Chunk upload session ready.",
-    tusUrl: `${appConfig.supabaseUrl}/storage/v1/upload/resumable`,
-    tusToken: signedUploadData.token,
-    supabaseAnonKey: process.env.SUPABASE_ANON_KEY || "",
     storagePath: storagePath,
   });
 });
@@ -1981,35 +1967,27 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
           session.isCompleting = false;
           return;
         }
+        const fileBuffer = await readFile(assembledPath);
+        const fileValidationError = await validateUploadedFileBuffer(
+          fileBuffer,
+          sanitizeMimeType(session.fileType),
+          session.fileSize,
+        );
+        if (fileValidationError) {
+          session.isCompleting = false;
+          return;
+        }
 
-        const supabaseUploadUrl = `${appConfig.supabaseUrl}/storage/v1/upload/resumable`;
-        await new Promise<void>((resolve, reject) => {
-          const upload = new tus.Upload(createReadStream(assembledPath), {
-            endpoint: supabaseUploadUrl,
-            retryDelays: [0, 3000, 5000, 10000, 20000],
-            headers: {
-              authorization: `Bearer ${appConfig.supabaseServiceRoleKey}`,
-              'x-upsert': 'true',
-            },
-            uploadDataDuringCreation: true,
-            removeFingerprintOnSuccess: true,
-            metadata: {
-              bucketName: FILE_BUCKET,
-              objectName: ensureRelativeStoragePath(session.storagePath),
-              contentType: sanitizeMimeType(session.fileType),
-              cacheControl: '3600',
-            },
-            chunkSize: 6 * 1024 * 1024,
-            onError: (error) => {
-              console.error("TUS chunked upload error:", error);
-              reject(error);
-            },
-            onSuccess: () => {
-              resolve();
-            },
+        const { error: uploadError } = await supabase.storage
+          .from(FILE_BUCKET)
+          .upload(ensureRelativeStoragePath(session.storagePath), fileBuffer, {
+            contentType: sanitizeMimeType(session.fileType),
+            upsert: false,
           });
-          upload.start();
-        });
+
+        if (uploadError) {
+          throw new Error(`Failed to store assembled upload: ${uploadError.message}`);
+        }
       }
 
       const currentDb = await loadDb();
