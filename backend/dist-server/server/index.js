@@ -489,9 +489,6 @@ const validateUploadedFileBuffer = async (fileBuffer, declaredMimeType, declared
     if (!isAllowedMimeType(effectiveMimeType)) {
         return "Unsupported file type. Allowed types: images, videos, audio, text, PDF, and ZIP.";
     }
-    if (declaredMimeType && detectedFileType?.mime && detectedFileType.mime !== declaredMimeType) {
-        return "Declared content type does not match the uploaded file.";
-    }
     if (isZipBombCandidate(effectiveMimeType, declaredSize, fileBuffer.length)) {
         return "Compressed archive appears unsafe.";
     }
