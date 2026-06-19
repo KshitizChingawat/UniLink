@@ -150,9 +150,9 @@ const PRO_MAX_ACTIVE_UPLOADS = 10;
 const MAX_FILES_PER_SELECTION = 10;
 const FREE_FILE_SIZE_LIMIT = Math.max(100 * 1024 * 1024, MAX_SINGLE_FILE_SIZE);
 const PRO_FILE_SIZE_LIMIT = Math.max(10 * 1024 * 1024 * 1024, MAX_SINGLE_FILE_SIZE);
-// Keep completion synchronous only for smaller uploads so the client does not
-// wait on a long-running request that can time out near the end of large ZIPs.
-const SYNC_COMPLETE_UPLOAD_LIMIT_BYTES = 32 * 1024 * 1024;
+// Keep moderate uploads synchronous so the UI can finish the transfer in one
+// final response instead of lingering in a background processing state.
+const SYNC_COMPLETE_UPLOAD_LIMIT_BYTES = 256 * 1024 * 1024;
 const MONTH_IN_MS = 30 * 24 * 60 * 60 * 1000;
 const OTP_FALLBACK_ENABLED = appConfig.allowOtpFallback;
 const DEMO_GOOGLE_LOGIN_ENABLED = !isProduction && appConfig.allowDemoGoogleLogin;
@@ -374,7 +374,7 @@ interface PendingUploadSession {
 }
 
 const uploadSessions = new Map<string, PendingUploadSession>();
-const LARGE_UPLOAD_CHUNK_BYTES = 5 * 1024 * 1024;
+const LARGE_UPLOAD_CHUNK_BYTES = 50 * 1024 * 1024;
 const UPLOAD_TEMP_ROOT = path.join(os.tmpdir(), "unilink-upload-sessions");
 const UPLOAD_SESSION_STALE_MS = 30 * 60 * 1000;
 const UPLOAD_REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
