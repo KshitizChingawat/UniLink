@@ -530,6 +530,17 @@ const cleanupUploadSession = async (session) => {
     uploadSessions.delete(session.id);
     await rm(session.tempDir, { recursive: true, force: true }).catch(() => undefined);
 };
+const findUploadSessionByTransferId = (transferId, userId) => Array.from(uploadSessions.values()).find((session) => session.transferId === transferId && session.userId === userId) || null;
+const removeStoredTransferFile = async (filePath) => {
+    if (!filePath)
+        return;
+    const { error } = await supabase.storage
+        .from(FILE_BUCKET)
+        .remove([ensureRelativeStoragePath(filePath)]);
+    if (error) {
+        console.error("Supabase Storage delete error:", error);
+    }
+};
 const cleanupStaleUploadSessions = async () => {
     const cutoff = Date.now() - UPLOAD_SESSION_STALE_MS;
     const staleSessions = Array.from(uploadSessions.values()).filter((session) => new Date(session.updatedAt || session.createdAt).getTime() < cutoff);
@@ -1902,8 +1913,13 @@ app.patch("/api/file-transfers/:id", syncLimiter, requireAuth, requireCsrf, asyn
     }
     if (typeof req.body.transfer_status === "string") {
         transfer.transferStatus = req.body.transfer_status;
-        if (req.body.transfer_status === "completed") {
+        if (req.body.transfer_status === "completed" || req.body.transfer_status === "cancelled") {
             transfer.completedAt = nowIso();
+        }
+        if (req.body.transfer_status === "cancelled") {
+            const activeSession = findUploadSessionByTransferId(transfer.id, req.auth.userId);
+            await cleanupUploadSession(activeSession);
+            await removeStoredTransferFile(transfer.filePath);
         }
     }
     await saveDb(db);
@@ -2193,14 +2209,10 @@ app.delete("/api/file-transfers/:id", syncLimiter, requireAuth, requireCsrf, asy
     const db = await loadDb();
     const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const transfer = getOwnedTransfer(db, req.auth.userId, transferId);
-    if (transfer?.filePath) {
-        // Remove from Supabase Storage
-        const { error: removeError } = await supabase.storage.from(FILE_BUCKET).remove([ensureRelativeStoragePath(transfer.filePath)]);
-        if (removeError) {
-            console.error("Supabase Storage delete error:", removeError);
-        }
-    }
-    db.fileTransfers = db.fileTransfers.filter((entry) => !(entry.id === req.params.id && entry.userId === req.auth.userId));
+    const activeSession = findUploadSessionByTransferId(transferId, req.auth.userId);
+    await cleanupUploadSession(activeSession);
+    await removeStoredTransferFile(transfer?.filePath);
+    db.fileTransfers = db.fileTransfers.filter((entry) => !(entry.id === transferId && entry.userId === req.auth.userId));
     await saveDb(db);
     res.status(204).send();
 });

@@ -37,6 +37,7 @@ export const useFileTransfer = () => {
   const [uploadProgress, setUploadProgress] = useState<{ [key: string]: number }>({});
   const activeUploadControllers = useRef<Record<string, Set<XMLHttpRequest>>>({});
   const uploadSessionIds = useRef<Record<string, string>>({});
+  const uploadFingerprints = useRef<Record<string, string>>({});
   const { user } = useAuth();
   // Route medium and large files through the resumable chunk path so uploads
   // stay responsive on hosted environments instead of waiting on one big relay.
@@ -166,6 +167,27 @@ export const useFileTransfer = () => {
     if (!xhr || activeUploadControllers.current[uploadId].size === 0) {
       delete activeUploadControllers.current[uploadId];
     }
+  };
+
+  const removeStoredUploadSession = (transferId: string) => {
+    const fileFingerprint = uploadFingerprints.current[transferId];
+    if (!fileFingerprint) return;
+    const nextStoredSessions = getUploadSessionMap();
+    delete nextStoredSessions[fileFingerprint];
+    setUploadSessionMap(nextStoredSessions);
+    delete uploadFingerprints.current[transferId];
+  };
+
+  const markTransferStatus = (transferId: string, status: FileTransfer['transfer_status']) => {
+    cachedTransfers = cachedTransfers.map((transfer) =>
+      transfer.id === transferId
+        ? {
+            ...transfer,
+            transfer_status: status,
+          }
+        : transfer,
+    );
+    setTransfers(cachedTransfers);
   };
 
   const rekeyUploadTracking = (fromId: string, toId: string) => {
@@ -520,6 +542,7 @@ export const useFileTransfer = () => {
 
       if (file.size > chunkSizeThreshold) {
         const fileFingerprint = getFileFingerprint(file, targetDeviceId, transferMethod);
+        uploadFingerprints.current[uploadId] = fileFingerprint;
         const storedSessions = getUploadSessionMap();
         let sessionUploadId = storedSessions[fileFingerprint] || '';
         let init: {
@@ -601,9 +624,7 @@ export const useFileTransfer = () => {
         } else {
           data = completionResponse as FileTransfer;
         }
-        const nextStoredSessions = getUploadSessionMap();
-        delete nextStoredSessions[fileFingerprint];
-        setUploadSessionMap(nextStoredSessions);
+        removeStoredUploadSession(uploadId);
         delete uploadSessionIds.current[uploadId];
       } else {
         data = await new Promise<FileTransfer>((resolve, reject) => {
@@ -694,16 +715,11 @@ export const useFileTransfer = () => {
       return data;
     } catch (err) {
       console.error('Start transfer error:', err);
-      const cancelled = err instanceof Error && /cancelled/i.test(err.message);
-      cachedTransfers = cachedTransfers.map((transfer) =>
-        transfer.id === uploadId
-          ? {
-              ...transfer,
-              transfer_status: cancelled ? 'cancelled' : 'failed',
-            }
-          : transfer
-      );
-      setTransfers(cachedTransfers);
+      const cancelled = err instanceof Error && /(cancelled|canceled|aborted)/i.test(err.message);
+      markTransferStatus(uploadId, cancelled ? 'cancelled' : 'failed');
+      if (cancelled) {
+        removeStoredUploadSession(uploadId);
+      }
       const message = cancelled
         ? `${file.name} transfer cancelled`
         : err instanceof ApiError
@@ -733,6 +749,12 @@ export const useFileTransfer = () => {
       return;
     }
 
+    markTransferStatus(transferId, 'cancelled');
+    setUploadProgress((current) => {
+      const next = { ...current };
+      delete next[transferId];
+      return next;
+    });
     xhrSet.forEach((xhr) => xhr.abort());
     unregisterActiveUpload(transferId);
     const sessionUploadId = uploadSessionIds.current[transferId];
@@ -742,6 +764,7 @@ export const useFileTransfer = () => {
       }).catch(() => undefined);
       delete uploadSessionIds.current[transferId];
     }
+    removeStoredUploadSession(transferId);
   };
 
   // Cancel file transfer
@@ -779,11 +802,15 @@ export const useFileTransfer = () => {
     try {
       cachedTransfers = nextTransfers;
       setTransfers(nextTransfers);
+      removeStoredUploadSession(transferId);
+      delete uploadSessionIds.current[transferId];
+      unregisterActiveUpload(transferId);
 
       await apiFetch(`/api/file-transfers/${transferId}`, {
         method: 'DELETE',
       });
 
+      await fetchTransfers();
       toast.success('File transfer deleted');
     } catch (err) {
       cachedTransfers = previousTransfers;
