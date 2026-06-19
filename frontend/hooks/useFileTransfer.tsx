@@ -196,6 +196,15 @@ export const useFileTransfer = () => {
     setTransfers(cachedTransfers);
   };
 
+  const clearUploadProgress = (uploadId: string) => {
+    setUploadProgress((current) => {
+      if (!(uploadId in current)) return current;
+      const next = { ...current };
+      delete next[uploadId];
+      return next;
+    });
+  };
+
   const rekeyUploadTracking = (fromId: string, toId: string) => {
     if (fromId === toId) return;
 
@@ -574,6 +583,8 @@ export const useFileTransfer = () => {
           body: JSON.stringify({ uploadId: sessionUploadId }),
         });
         if ('processing' in completionResponse && completionResponse.processing) {
+          clearUploadProgress(uploadId);
+          void fetchTransfers();
           const completedTransfer = await pollCompletedTransfer((completionResponse as { transferId: string }).transferId);
           if (!completedTransfer) {
             throw new Error('File processing is taking too long. Please keep the app open while we finish syncing it.');
@@ -666,10 +677,7 @@ export const useFileTransfer = () => {
       setTransfers(cachedTransfers);
       clearUploadTracking(uploadId);
       void fetchTransfers();
-      setUploadProgress((current) => ({
-        ...current,
-        [uploadId]: 100,
-      }));
+      clearUploadProgress(uploadId);
       toast.success(`File transfer completed: ${file.name}`);
       return data;
     } catch (err) {
@@ -692,11 +700,7 @@ export const useFileTransfer = () => {
         toast.error(message);
       }
     } finally {
-      setUploadProgress((current) => {
-        const next = { ...current };
-        delete next[uploadId];
-        return next;
-      });
+      clearUploadProgress(uploadId);
       setLoading(false);
     }
   };
@@ -709,11 +713,7 @@ export const useFileTransfer = () => {
     }
 
     markTransferStatus(transferId, 'cancelled');
-    setUploadProgress((current) => {
-      const next = { ...current };
-      delete next[transferId];
-      return next;
-    });
+    clearUploadProgress(transferId);
     xhrSet.forEach((xhr) => xhr.abort());
     unregisterActiveUpload(transferId);
     const sessionUploadId = uploadSessionIds.current[transferId];
@@ -740,7 +740,7 @@ export const useFileTransfer = () => {
         })
       });
 
-      await fetchTransfers();
+      void fetchTransfers();
       toast.success('Transfer cancelled');
     } catch (err) {
       console.error('Cancel transfer error:', err);
@@ -767,7 +767,7 @@ export const useFileTransfer = () => {
         method: 'DELETE',
       });
 
-      await fetchTransfers();
+      void fetchTransfers();
       toast.success('File transfer deleted');
     } catch (err) {
       cachedTransfers = previousTransfers;
