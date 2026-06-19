@@ -259,8 +259,8 @@ export const useFileTransfer = () => {
           endpoint: tusUrl,
           retryDelays: [0, 3000, 5000, 10000, 20000],
           headers: {
-            'x-signature': tusToken,
-            ...(anonKey ? { apikey: anonKey } : {})
+            Authorization: `Bearer ${tusToken}`,
+            'x-upsert': 'true',
           },
           metadata: {
             bucketName: 'unilink-files',
