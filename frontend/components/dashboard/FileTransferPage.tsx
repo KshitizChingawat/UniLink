@@ -30,15 +30,18 @@ const FileTransferPage = () => {
   const proActive = user?.plan === 'pro' && (!user.subscriptionExpiresAt || new Date(user.subscriptionExpiresAt).getTime() > Date.now());
   const uploadLimit = proActive ? 10 * 1024 * 1024 * 1024 : 100 * 1024 * 1024;
   const uploadLimitLabel = proActive ? '10 GB' : '100 MB';
-  const maxFilesPerSelection = 10;
+  const maxFilesPerSelection = proActive ? 10 : 1;
   const uploadLimitMessage = proActive
     ? `Your Pro plan supports files up to ${uploadLimitLabel}.`
     : "Free plan supports files up to 100 MB per file. Upgrade to Pro to share files up to 10 GB.";
+  const fileCountMessage = proActive
+    ? `You can upload up to ${maxFilesPerSelection} files at a time.`
+    : 'Free plan supports one file per transfer. Upgrade to Pro to send up to 10 files at once.';
   const sanitizeDisplayName = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f<>`"']/g, '').trim() || 'file';
 
   const onDrop = async (acceptedFiles: File[]) => {
     if (acceptedFiles.length > maxFilesPerSelection) {
-      toast.error(`You can upload up to ${maxFilesPerSelection} files at a time.`);
+      toast.error(fileCountMessage);
       return;
     }
 
@@ -54,7 +57,7 @@ const FileTransferPage = () => {
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    multiple: true,
+    multiple: maxFilesPerSelection > 1,
     maxSize: uploadLimit,
     maxFiles: maxFilesPerSelection,
     noClick: true,
@@ -75,7 +78,7 @@ const FileTransferPage = () => {
     }
 
     if (files.length > maxFilesPerSelection) {
-      toast.error(`You can upload up to ${maxFilesPerSelection} files at a time.`);
+      toast.error(fileCountMessage);
       event.target.value = '';
       return;
     }

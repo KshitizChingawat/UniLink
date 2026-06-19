@@ -143,10 +143,12 @@ const uploadLimiter = rateLimit({
 const MAX_SINGLE_FILE_SIZE = appConfig.maxFileSizeBytes;
 const FREE_TOTAL_USER_STORAGE = 500 * 1024 * 1024;
 const PRO_TOTAL_USER_STORAGE = 100 * 1024 * 1024 * 1024;
-const MAX_ACTIVE_UPLOADS_PER_USER = 10;
+const FREE_MAX_ACTIVE_UPLOADS = 1;
+const PRO_MAX_ACTIVE_UPLOADS = 10;
 const MAX_FILES_PER_SELECTION = 10;
 const FREE_FILE_SIZE_LIMIT = Math.max(100 * 1024 * 1024, MAX_SINGLE_FILE_SIZE);
 const PRO_FILE_SIZE_LIMIT = Math.max(10 * 1024 * 1024 * 1024, MAX_SINGLE_FILE_SIZE);
+const SYNC_COMPLETE_UPLOAD_LIMIT_BYTES = 256 * 1024 * 1024;
 const MONTH_IN_MS = 30 * 24 * 60 * 60 * 1000;
 const OTP_FALLBACK_ENABLED = appConfig.allowOtpFallback;
 const DEMO_GOOGLE_LOGIN_ENABLED = !isProduction && appConfig.allowDemoGoogleLogin;
@@ -400,6 +402,7 @@ const refreshUserPlan = (user) => {
 };
 const getUserFileLimit = (user) => isSubscriptionActive(user) ? PRO_FILE_SIZE_LIMIT : FREE_FILE_SIZE_LIMIT;
 const getUserTotalStorageLimit = (user) => isSubscriptionActive(user) ? PRO_TOTAL_USER_STORAGE : FREE_TOTAL_USER_STORAGE;
+const getMaxActiveUploadsForUser = (user) => isSubscriptionActive(user) ? PRO_MAX_ACTIVE_UPLOADS : FREE_MAX_ACTIVE_UPLOADS;
 const FREE_CLIPBOARD_WORD_LIMIT = 100;
 const PRO_CLIPBOARD_WORD_LIMIT = 5000;
 const FREE_CLIPBOARD_MESSAGE_LIMIT = 10;
@@ -469,10 +472,11 @@ const assertUploadConstraints = (db, user, fileName, fileSize, fileType) => {
             error: `Storage quota exceeded. Your plan currently allows up to ${bytesToLabel(totalStorageLimit)} total data per account.`,
         };
     }
-    if (getActiveUploadCountForUser(user.id) >= MAX_ACTIVE_UPLOADS_PER_USER) {
+    const maxActiveUploadsForUser = getMaxActiveUploadsForUser(user);
+    if (getActiveUploadCountForUser(user.id) >= maxActiveUploadsForUser) {
         return {
             status: 429,
-            error: `Too many active uploads. Please wait for current uploads to finish before starting more than ${MAX_ACTIVE_UPLOADS_PER_USER}.`,
+            error: `Too many active uploads. Please wait for current uploads to finish before starting more than ${maxActiveUploadsForUser}.`,
         };
     }
     return null;
@@ -1587,21 +1591,14 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
         });
         return;
     }
-    session.isCompleting = true;
-    session.updatedAt = nowIso();
-    // Prevent timeout on large files by returning 202 immediately.
-    res.status(202).json({
-        transferId: session.transferId,
-        transfer_status: "in_progress",
-        processing: true,
-    });
-    (async () => {
+    const finalizeUpload = async () => {
+        session.isCompleting = true;
+        session.updatedAt = nowIso();
         try {
             if (!session.isDirectUpload) {
                 const uploadedChunkIndices = await getUploadedChunkIndices(session);
                 if (uploadedChunkIndices.length !== session.totalChunks) {
-                    session.isCompleting = false;
-                    return;
+                    throw new Error("Upload is still missing one or more chunks.");
                 }
                 const assembledPath = path.join(session.tempDir, "assembled-upload.bin");
                 await new Promise((resolve, reject) => {
@@ -1622,14 +1619,12 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
                 });
                 const scanResult = await scanUploadedPayload(session.fileName, sanitizeMimeType(session.fileType), session.fileSize);
                 if (!scanResult.clean) {
-                    session.isCompleting = false;
-                    return;
+                    throw new Error("The uploaded file failed security scanning.");
                 }
                 const fileBuffer = await readFile(assembledPath);
                 const fileValidationError = await validateUploadedFileBuffer(fileBuffer, sanitizeMimeType(session.fileType), session.fileSize);
                 if (fileValidationError) {
-                    session.isCompleting = false;
-                    return;
+                    throw new Error(fileValidationError);
                 }
                 const { error: uploadError } = await supabase.storage
                     .from(FILE_BUCKET)
@@ -1671,6 +1666,7 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
             ];
             await saveDb(currentDb);
             await cleanupUploadSession(session);
+            return transfer;
         }
         catch (error) {
             session.isCompleting = false;
@@ -1682,8 +1678,26 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
                 failedTransfer.completedAt = nowIso();
                 await saveDb(currentDb);
             }
+            throw error;
         }
-    })();
+    };
+    if (session.fileSize <= SYNC_COMPLETE_UPLOAD_LIMIT_BYTES) {
+        try {
+            const completedTransfer = await finalizeUpload();
+            res.status(200).json(completedTransfer);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : "Failed to complete upload.";
+            res.status(500).json({ error: message });
+        }
+        return;
+    }
+    res.status(202).json({
+        transferId: session.transferId,
+        transfer_status: "in_progress",
+        processing: true,
+    });
+    void finalizeUpload().catch(() => undefined);
 });
 app.post("/api/auth/logout", requireAuth, async (req, res) => {
     await revokeToken(req.auth.jti, "logout");
