@@ -16,7 +16,7 @@ import { getReadableDeviceName } from '@/lib/device-display';
 
 const FileTransferPage = () => {
   const { user } = useAuth();
-  const { transfers, loading, uploadProgress, startFileTransfer, cancelActiveUpload, deleteTransfer, downloadFile } = useFileTransfer();
+  const { transfers, loading, uploadProgress, uploadDisplayNames, startFileTransfer, cancelActiveUpload, deleteTransfer, downloadFile } = useFileTransfer();
   const { devices } = useDevices();
   const [selectedDevice, setSelectedDevice] = useState<string>('all');
   const [previewUrl, setPreviewUrl] = useState('');
@@ -272,7 +272,9 @@ const FileTransferPage = () => {
             <div className="space-y-3 rounded-xl border border-unilink-200 bg-unilink-50/70 p-4">
               {Object.entries(uploadProgress).map(([uploadId, percent]) => {
                 const activeTransfer = transfers.find((transfer) => transfer.id === uploadId);
-                const activeName = activeTransfer ? getTransferField(activeTransfer, 'fileName') : uploadId;
+                const activeName = activeTransfer
+                  ? getTransferField(activeTransfer, 'fileName')
+                  : uploadDisplayNames[uploadId] || 'Preparing transfer...';
                 return (
                   <div key={uploadId} className="space-y-2">
                     <div className="flex flex-wrap items-center justify-between gap-3 text-sm">

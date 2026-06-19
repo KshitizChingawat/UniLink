@@ -107,10 +107,11 @@ export const saveDb = async (db) => {
     writeLock = writeLock
         .catch(() => undefined)
         .then(async () => {
-        const remoteRaw = await readDb();
-        const remoteDb = normalizeDb(remoteRaw ? JSON.parse(remoteRaw) : null);
-        const mergedDb = mergeDb(remoteDb, normalizeDb(db));
-        await writeDb(JSON.stringify(mergedDb, null, 2));
+        // Persist the caller's normalized snapshot directly. The write lock
+        // already serializes mutations, and merging by id here causes deleted
+        // records such as file transfers to be resurrected on the next save.
+        const normalizedDb = normalizeDb(db);
+        await writeDb(JSON.stringify(normalizedDb, null, 2));
     });
     await writeLock;
 };

@@ -37,10 +37,11 @@ export const useFileTransfer = () => {
   const activeUploadControllers = useRef<Record<string, Set<XMLHttpRequest>>>({});
   const uploadSessionIds = useRef<Record<string, string>>({});
   const uploadFingerprints = useRef<Record<string, string>>({});
+  const uploadDisplayNames = useRef<Record<string, string>>({});
   const { user } = useAuth();
   // Route medium and large files through the resumable chunk path so uploads
   // stay responsive on hosted environments instead of waiting on one big relay.
-  const chunkSizeThreshold = 8 * 1024 * 1024;
+  const chunkSizeThreshold = 32 * 1024 * 1024;
   const chunkUploadConcurrency = 4;
   const chunkRetryLimit = 5;
   const chunkRequestTimeoutMs = 10 * 60 * 1000;
@@ -177,6 +178,12 @@ export const useFileTransfer = () => {
     delete uploadFingerprints.current[transferId];
   };
 
+  const clearUploadTracking = (transferId: string) => {
+    removeStoredUploadSession(transferId);
+    delete uploadSessionIds.current[transferId];
+    delete uploadDisplayNames.current[transferId];
+  };
+
   const markTransferStatus = (transferId: string, status: FileTransfer['transfer_status']) => {
     cachedTransfers = cachedTransfers.map((transfer) =>
       transfer.id === transferId
@@ -208,6 +215,11 @@ export const useFileTransfer = () => {
     if (uploadSessionIds.current[fromId]) {
       uploadSessionIds.current[toId] = uploadSessionIds.current[fromId];
       delete uploadSessionIds.current[fromId];
+    }
+
+    if (uploadDisplayNames.current[fromId]) {
+      uploadDisplayNames.current[toId] = uploadDisplayNames.current[fromId];
+      delete uploadDisplayNames.current[fromId];
     }
 
     cachedTransfers = cachedTransfers.map((transfer) =>
@@ -444,7 +456,14 @@ export const useFileTransfer = () => {
 
     try {
       const data = await apiFetch<FileTransfer[]>('/api/file-transfers');
-      cachedTransfers = data || [];
+      const serverTransfers = data || [];
+      const localUploads = cachedTransfers.filter(
+        (transfer) =>
+          transfer.transfer_status === 'in_progress' &&
+          uploadProgress[transfer.id] !== undefined &&
+          !serverTransfers.some((serverTransfer) => serverTransfer.id === transfer.id),
+      );
+      cachedTransfers = [...localUploads, ...serverTransfers];
       cachedTransfersUserId = user.id;
       setTransfers(cachedTransfers);
     } catch (err) {
@@ -471,6 +490,7 @@ export const useFileTransfer = () => {
     const token = localStorage.getItem('auth_token');
     if (!token) return;
     let uploadId = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    uploadDisplayNames.current[uploadId] = file.name;
     const apiBaseUrl = await resolveApiBaseUrl();
 
     try {
@@ -644,6 +664,7 @@ export const useFileTransfer = () => {
       ];
       cachedTransfersUserId = user.id;
       setTransfers(cachedTransfers);
+      clearUploadTracking(uploadId);
       void fetchTransfers();
       setUploadProgress((current) => ({
         ...current,
@@ -656,7 +677,7 @@ export const useFileTransfer = () => {
       const cancelled = err instanceof Error && /(cancelled|canceled|aborted)/i.test(err.message);
       markTransferStatus(uploadId, cancelled ? 'cancelled' : 'failed');
       if (cancelled) {
-        removeStoredUploadSession(uploadId);
+        clearUploadTracking(uploadId);
       }
       const message = cancelled
         ? `${file.name} transfer cancelled`
@@ -700,9 +721,8 @@ export const useFileTransfer = () => {
       void apiFetch(`/api/file-transfers/upload-session/${sessionUploadId}`, {
         method: 'DELETE',
       }).catch(() => undefined);
-      delete uploadSessionIds.current[transferId];
     }
-    removeStoredUploadSession(transferId);
+    clearUploadTracking(transferId);
   };
 
   // Cancel file transfer
@@ -740,8 +760,7 @@ export const useFileTransfer = () => {
     try {
       cachedTransfers = nextTransfers;
       setTransfers(nextTransfers);
-      removeStoredUploadSession(transferId);
-      delete uploadSessionIds.current[transferId];
+      clearUploadTracking(transferId);
       unregisterActiveUpload(transferId);
 
       await apiFetch(`/api/file-transfers/${transferId}`, {
@@ -858,6 +877,7 @@ export const useFileTransfer = () => {
     transfers,
     loading,
     uploadProgress,
+    uploadDisplayNames: uploadDisplayNames.current,
     startFileTransfer,
     cancelTransfer,
     cancelActiveUpload,
