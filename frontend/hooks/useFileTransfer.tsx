@@ -59,6 +59,8 @@ export const useFileTransfer = () => {
     }
   };
 
+  const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
   const setUploadSessionMap = (value: Record<string, string>) => {
     if (typeof window === 'undefined') return;
     localStorage.setItem(uploadSessionStorageKey, JSON.stringify(value));
@@ -435,6 +437,55 @@ export const useFileTransfer = () => {
     return null;
   };
 
+  const recoverCompletedUpload = async (uploadId: string, sessionUploadId: string) => {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        const uploadStatus = await apiFetch<{
+          uploadId: string;
+          transferId: string;
+          chunkSize: number;
+          totalChunks: number;
+          uploadedChunks: number[];
+          processing: boolean;
+          transferStatus: FileTransfer['transfer_status'];
+        }>(`/api/file-transfers/upload-status/${sessionUploadId}`);
+
+        if (uploadStatus.transferStatus === 'completed') {
+          const completedTransfer = await pollCompletedTransfer(uploadStatus.transferId);
+          if (completedTransfer) {
+            return completedTransfer;
+          }
+
+          const latestTransfers = await apiFetch<FileTransfer[]>('/api/file-transfers');
+          const completedEntry = latestTransfers.find((entry) => entry.id === uploadStatus.transferId);
+          if (completedEntry && getTransferFieldValue(completedEntry, 'transfer_status', 'transferStatus') === 'completed') {
+            cachedTransfers = latestTransfers;
+            if (user) {
+              cachedTransfersUserId = user.id;
+            }
+            setTransfers(cachedTransfers);
+            return completedEntry;
+          }
+        }
+
+        if (uploadStatus.processing || uploadStatus.uploadedChunks.length === uploadStatus.totalChunks) {
+          const completedTransfer = await pollCompletedTransfer(uploadStatus.transferId);
+          if (completedTransfer) {
+            return completedTransfer;
+          }
+        }
+      } catch {
+        // Keep trying a few times. A temporary fetch failure should not turn a finished upload into a cancelled one.
+      }
+
+      if (attempt < 3) {
+        await sleep(1_500);
+      }
+    }
+
+    return null;
+  };
+
   const getStoredCurrentDevice = () => {
     if (typeof window === 'undefined') return null;
     const saved = localStorage.getItem('unilink_current_device');
@@ -578,23 +629,66 @@ export const useFileTransfer = () => {
           [uploadId]: 98,
         }));
 
-        const completionResponse = await apiFetch<FileTransfer | { transferId: string; processing: boolean }>('/api/file-transfers/complete-upload', {
-          method: 'POST',
-          body: JSON.stringify({ uploadId: sessionUploadId }),
-        });
-        if ('processing' in completionResponse && completionResponse.processing) {
+        let completionResponse: FileTransfer | { transferId: string; processing: boolean } | null = null;
+        try {
+          completionResponse = await apiFetch<FileTransfer | { transferId: string; processing: boolean }>('/api/file-transfers/complete-upload', {
+            method: 'POST',
+            body: JSON.stringify({ uploadId: sessionUploadId }),
+          });
+        } catch (completionError) {
+          console.warn('Initial upload completion request failed, attempting recovery:', completionError);
+        }
+
+        if (completionResponse && 'processing' in completionResponse && completionResponse.processing) {
           clearUploadProgress(uploadId);
           void fetchTransfers();
-          const completedTransfer = await pollCompletedTransfer((completionResponse as { transferId: string }).transferId);
-          if (!completedTransfer) {
-            throw new Error('File processing is taking too long. Please keep the app open while we finish syncing it.');
-          }
-          data = completedTransfer;
-        } else {
+          data = {
+            ...pendingTransfer,
+            id: uploadId,
+            transfer_status: 'in_progress',
+          };
+          toast.info(`${file.name} is finalizing in the background.`);
+          void recoverCompletedUpload(uploadId, sessionUploadId).then((backgroundCompletedTransfer) => {
+            if (!backgroundCompletedTransfer) return;
+            cachedTransfers = [
+              backgroundCompletedTransfer,
+              ...cachedTransfers.filter((transfer) => transfer.id !== backgroundCompletedTransfer.id),
+            ];
+            cachedTransfersUserId = user.id;
+            setTransfers(cachedTransfers);
+            clearUploadTracking(uploadId);
+            clearUploadProgress(uploadId);
+            void fetchTransfers();
+            toast.success(`File transfer completed: ${file.name}`);
+          });
+        } else if (completionResponse) {
           data = completionResponse as FileTransfer;
+        } else {
+          clearUploadProgress(uploadId);
+          data = {
+            ...pendingTransfer,
+            id: uploadId,
+            transfer_status: 'in_progress',
+          };
+          toast.info(`${file.name} finished sending and is syncing in the background.`);
+          void recoverCompletedUpload(uploadId, sessionUploadId).then((backgroundCompletedTransfer) => {
+            if (!backgroundCompletedTransfer) return;
+            cachedTransfers = [
+              backgroundCompletedTransfer,
+              ...cachedTransfers.filter((transfer) => transfer.id !== backgroundCompletedTransfer.id),
+            ];
+            cachedTransfersUserId = user.id;
+            setTransfers(cachedTransfers);
+            clearUploadTracking(uploadId);
+            clearUploadProgress(uploadId);
+            void fetchTransfers();
+            toast.success(`File transfer completed: ${file.name}`);
+          });
         }
-        removeStoredUploadSession(uploadId);
-        delete uploadSessionIds.current[uploadId];
+        if (data.transfer_status !== 'in_progress') {
+          removeStoredUploadSession(uploadId);
+          delete uploadSessionIds.current[uploadId];
+        }
       } else {
         data = await new Promise<FileTransfer>((resolve, reject) => {
           const xhr = new XMLHttpRequest();
@@ -675,17 +769,30 @@ export const useFileTransfer = () => {
       ];
       cachedTransfersUserId = user.id;
       setTransfers(cachedTransfers);
-      clearUploadTracking(uploadId);
+      if (normalizedTransfer.transfer_status !== 'in_progress') {
+        clearUploadTracking(uploadId);
+      }
       void fetchTransfers();
       clearUploadProgress(uploadId);
-      toast.success(`File transfer completed: ${file.name}`);
+      if (normalizedTransfer.transfer_status === 'in_progress') {
+        toast.info(`${file.name} is syncing in the background.`);
+      } else {
+        toast.success(`File transfer completed: ${file.name}`);
+      }
       return data;
     } catch (err) {
       console.error('Start transfer error:', err);
       const cancelled = err instanceof Error && /(cancelled|canceled|aborted)/i.test(err.message);
-      markTransferStatus(uploadId, cancelled ? 'cancelled' : 'failed');
+      const recoverableCompletionFailure =
+        err instanceof Error && /(failed to fetch|networkerror|network error|fetch failed)/i.test(err.message);
       if (cancelled) {
+        markTransferStatus(uploadId, 'cancelled');
         clearUploadTracking(uploadId);
+      } else if (recoverableCompletionFailure) {
+        markTransferStatus(uploadId, 'in_progress');
+        void fetchTransfers();
+      } else {
+        markTransferStatus(uploadId, 'failed');
       }
       const message = cancelled
         ? `${file.name} transfer cancelled`
@@ -696,6 +803,8 @@ export const useFileTransfer = () => {
             : 'Failed to start file transfer';
       if (cancelled) {
         toast.info(message);
+      } else if (recoverableCompletionFailure) {
+        toast.info(`${file.name} uploaded, and we're finishing the sync in the background.`);
       } else {
         toast.error(message);
       }

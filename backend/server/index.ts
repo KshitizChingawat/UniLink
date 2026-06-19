@@ -150,7 +150,9 @@ const PRO_MAX_ACTIVE_UPLOADS = 10;
 const MAX_FILES_PER_SELECTION = 10;
 const FREE_FILE_SIZE_LIMIT = Math.max(100 * 1024 * 1024, MAX_SINGLE_FILE_SIZE);
 const PRO_FILE_SIZE_LIMIT = Math.max(10 * 1024 * 1024 * 1024, MAX_SINGLE_FILE_SIZE);
-const SYNC_COMPLETE_UPLOAD_LIMIT_BYTES = 256 * 1024 * 1024;
+// Keep completion synchronous only for smaller uploads so the client does not
+// wait on a long-running request that can time out near the end of large ZIPs.
+const SYNC_COMPLETE_UPLOAD_LIMIT_BYTES = 32 * 1024 * 1024;
 const MONTH_IN_MS = 30 * 24 * 60 * 60 * 1000;
 const OTP_FALLBACK_ENABLED = appConfig.allowOtpFallback;
 const DEMO_GOOGLE_LOGIN_ENABLED = !isProduction && appConfig.allowDemoGoogleLogin;
