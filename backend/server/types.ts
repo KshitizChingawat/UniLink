@@ -63,6 +63,7 @@ export interface FileTransferRecord {
   uploadTempDir?: string;
   uploadChunkSize?: number;
   uploadTotalChunks?: number;
+  uploadUploadedChunks?: number[];
   uploadUpdatedAt?: string;
   uploadTokenJti?: string;
   downloadTokenJti?: string;

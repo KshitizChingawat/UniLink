@@ -4,7 +4,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { fileTypeFromBuffer } from "file-type";
 import { randomInt, randomUUID } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createWriteStream } from "node:fs";
 import { mkdir, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -375,7 +375,6 @@ interface PendingUploadSession {
 
 const uploadSessions = new Map<string, PendingUploadSession>();
 const LARGE_UPLOAD_CHUNK_BYTES = 50 * 1024 * 1024;
-const CHUNKED_STORAGE_FINALIZE_THRESHOLD_BYTES = 64 * 1024 * 1024;
 const UPLOAD_TEMP_ROOT = path.join(os.tmpdir(), "unilink-upload-sessions");
 const UPLOAD_SESSION_STALE_MS = 30 * 60 * 1000;
 const UPLOAD_REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
@@ -707,7 +706,7 @@ const createPendingUploadSession = async (
       transfer.uploadTotalChunks || Math.max(1, Math.ceil(transfer.fileSize / (transfer.uploadChunkSize || LARGE_UPLOAD_CHUNK_BYTES))),
     createdAt: transfer.createdAt,
     updatedAt: transfer.uploadUpdatedAt || transfer.createdAt,
-    uploadedChunks: new Set<number>(),
+    uploadedChunks: new Set<number>(transfer.uploadUploadedChunks || []),
     isDirectUpload: false,
   };
 
@@ -2038,6 +2037,28 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
     return;
   }
 
+  try {
+    const chunkBuffer = await readFile(chunkPath);
+    const storageChunkPath = getChunkStoragePath(session.storagePath, chunkIndex);
+    const { error: chunkUploadError } = await supabase.storage
+      .from(FILE_BUCKET)
+      .upload(storageChunkPath, chunkBuffer, {
+        contentType: "application/octet-stream",
+        upsert: false,
+      });
+
+    if (chunkUploadError) {
+      throw new Error(`Failed to store uploaded chunk: ${chunkUploadError.message}`);
+    }
+  } catch (error) {
+    await rm(chunkPath, { force: true }).catch(() => undefined);
+    const message = error instanceof Error ? error.message : "Chunk upload failed";
+    res.status(500).json({ error: message });
+    return;
+  }
+
+  await rm(chunkPath, { force: true }).catch(() => undefined);
+
   session.uploadedChunks.add(chunkIndex);
   session.updatedAt = nowIso();
   {
@@ -2050,6 +2071,7 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
       transfer.uploadTempDir = session.tempDir;
       transfer.uploadChunkSize = session.chunkSize;
       transfer.uploadTotalChunks = session.totalChunks;
+      transfer.uploadUploadedChunks = Array.from(session.uploadedChunks).sort((a, b) => a - b);
       transfer.uploadUpdatedAt = session.updatedAt;
       if (!transfer.storageMode) {
         transfer.storageMode = "chunked";
@@ -2135,93 +2157,16 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
           createdAt: session.createdAt,
           filePath: session.storagePath,
         } as FileTransferRecord);
-
-        if (session.fileSize > CHUNKED_STORAGE_FINALIZE_THRESHOLD_BYTES) {
-          const uploadedChunkPaths: string[] = [];
-          try {
-            for (const chunkIndex of uploadedChunkIndices) {
-              const chunkPath = getUploadChunkPath(session, chunkIndex);
-              const chunkBuffer = await readFile(chunkPath);
-              const storageChunkPath = getChunkStoragePath(session.storagePath, chunkIndex);
-              const { error: chunkUploadError } = await supabase.storage
-                .from(FILE_BUCKET)
-                .upload(storageChunkPath, chunkBuffer, {
-                  contentType: "application/octet-stream",
-                  upsert: false,
-                });
-
-              if (chunkUploadError) {
-                throw new Error(`Failed to store upload chunk ${chunkIndex + 1}: ${chunkUploadError.message}`);
-              }
-
-              uploadedChunkPaths.push(storageChunkPath);
-            }
-          } catch (error) {
-            if (uploadedChunkPaths.length > 0) {
-              await supabase.storage.from(FILE_BUCKET).remove(uploadedChunkPaths).catch(() => undefined);
-            }
-            throw error;
-          }
-
-          transfer.transferStatus = "completed";
-          transfer.completedAt = nowIso();
-          transfer.filePath = session.storagePath;
-          transfer.storageMode = "chunked";
-          transfer.uploadSessionId = session.id;
-          transfer.uploadTempDir = session.tempDir;
-          transfer.uploadChunkSize = session.chunkSize;
-          transfer.uploadTotalChunks = session.totalChunks;
-          transfer.uploadUpdatedAt = nowIso();
-        } else {
-          const assembledPath = path.join(session.tempDir, "assembled-upload.bin");
-          await new Promise<void>((resolve, reject) => {
-            const output = createWriteStream(assembledPath);
-            const appendNext = (index: number) => {
-              if (index >= uploadedChunkIndices.length) {
-                output.end();
-                return;
-              }
-              const input = createReadStream(getUploadChunkPath(session, uploadedChunkIndices[index]));
-              input.on("error", reject);
-              input.on("end", () => appendNext(index + 1));
-              input.pipe(output, { end: false });
-            };
-            output.on("finish", resolve);
-            output.on("error", reject);
-            appendNext(0);
-          });
-
-          const fileBuffer = await readFile(assembledPath);
-          const fileValidationError = await validateUploadedFileBuffer(
-            fileBuffer,
-            sanitizeMimeType(session.fileType),
-            session.fileSize,
-          );
-          if (fileValidationError) {
-            throw new Error(fileValidationError);
-          }
-
-          const { error: uploadError } = await supabase.storage
-            .from(FILE_BUCKET)
-            .upload(ensureRelativeStoragePath(session.storagePath), fileBuffer, {
-              contentType: sanitizeMimeType(session.fileType),
-              upsert: false,
-            });
-
-          if (uploadError) {
-            throw new Error(`Failed to store assembled upload: ${uploadError.message}`);
-          }
-
-          transfer.transferStatus = "completed";
-          transfer.completedAt = nowIso();
-          transfer.filePath = session.storagePath;
-          transfer.storageMode = "single";
-          transfer.uploadSessionId = session.id;
-          transfer.uploadTempDir = session.tempDir;
-          transfer.uploadChunkSize = session.chunkSize;
-          transfer.uploadTotalChunks = session.totalChunks;
-          transfer.uploadUpdatedAt = nowIso();
-        }
+        transfer.transferStatus = "completed";
+        transfer.completedAt = nowIso();
+        transfer.filePath = session.storagePath;
+        transfer.storageMode = "chunked";
+        transfer.uploadSessionId = session.id;
+        transfer.uploadTempDir = session.tempDir;
+        transfer.uploadChunkSize = session.chunkSize;
+        transfer.uploadTotalChunks = session.totalChunks;
+        transfer.uploadUploadedChunks = uploadedChunkIndices;
+        transfer.uploadUpdatedAt = nowIso();
 
         currentDb.fileTransfers = [
           transfer,
