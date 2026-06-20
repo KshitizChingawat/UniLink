@@ -58,6 +58,12 @@ export interface FileTransferRecord {
   createdAt: string;
   completedAt?: string;
   filePath?: string;
+  storageMode?: "single" | "chunked";
+  uploadSessionId?: string;
+  uploadTempDir?: string;
+  uploadChunkSize?: number;
+  uploadTotalChunks?: number;
+  uploadUpdatedAt?: string;
   uploadTokenJti?: string;
   downloadTokenJti?: string;
 }

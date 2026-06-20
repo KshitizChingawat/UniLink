@@ -1,5 +1,5 @@
 import cors from "cors";
-import express from "express";
+import express, { type Response } from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { fileTypeFromBuffer } from "file-type";
@@ -375,6 +375,7 @@ interface PendingUploadSession {
 
 const uploadSessions = new Map<string, PendingUploadSession>();
 const LARGE_UPLOAD_CHUNK_BYTES = 50 * 1024 * 1024;
+const CHUNKED_STORAGE_FINALIZE_THRESHOLD_BYTES = 64 * 1024 * 1024;
 const UPLOAD_TEMP_ROOT = path.join(os.tmpdir(), "unilink-upload-sessions");
 const UPLOAD_SESSION_STALE_MS = 30 * 60 * 1000;
 const UPLOAD_REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
@@ -676,6 +677,106 @@ const findUploadSessionByTransferId = (transferId: string, userId: string) =>
     (session) => session.transferId === transferId && session.userId === userId,
   ) || null;
 
+const getChunkStoragePath = (storagePath: string, chunkIndex: number) =>
+  ensureRelativeStoragePath(`${storagePath}/chunks/${String(chunkIndex).padStart(6, "0")}.part`);
+
+const createPendingUploadSession = async (
+  transfer: FileTransferRecord,
+): Promise<PendingUploadSession | null> => {
+  if (transfer.transferStatus !== "in_progress" || !transfer.filePath || !transfer.uploadSessionId) {
+    return null;
+  }
+
+  const tempDir = transfer.uploadTempDir || path.join(UPLOAD_TEMP_ROOT, transfer.uploadSessionId);
+  await mkdir(tempDir, { recursive: true });
+
+  const session: PendingUploadSession = {
+    id: transfer.uploadSessionId,
+    userId: transfer.userId,
+    transferId: transfer.id,
+    fileName: transfer.fileName,
+    fileSize: transfer.fileSize,
+    fileType: transfer.fileType,
+    senderDeviceId: transfer.senderDeviceId,
+    receiverDeviceId: transfer.receiverDeviceId,
+    transferMethod: transfer.transferMethod,
+    storagePath: transfer.filePath,
+    tempDir,
+    chunkSize: transfer.uploadChunkSize || LARGE_UPLOAD_CHUNK_BYTES,
+    totalChunks:
+      transfer.uploadTotalChunks || Math.max(1, Math.ceil(transfer.fileSize / (transfer.uploadChunkSize || LARGE_UPLOAD_CHUNK_BYTES))),
+    createdAt: transfer.createdAt,
+    updatedAt: transfer.uploadUpdatedAt || transfer.createdAt,
+    uploadedChunks: new Set<number>(),
+    isDirectUpload: false,
+  };
+
+  const uploadedChunks = await getUploadedChunkIndices(session);
+  session.uploadedChunks = new Set(uploadedChunks);
+  uploadSessions.set(session.id, session);
+  return session;
+};
+
+const getActiveUploadSessionById = async (uploadId: string, userId: string) => {
+  const existingSession = uploadSessions.get(uploadId);
+  if (existingSession && existingSession.userId === userId) {
+    return existingSession;
+  }
+
+  const db = await loadDb();
+  const transfer = db.fileTransfers.find(
+    (entry) =>
+      entry.userId === userId &&
+      entry.uploadSessionId === uploadId &&
+      entry.transferStatus === "in_progress",
+  );
+  if (!transfer) {
+    return null;
+  }
+
+  return createPendingUploadSession(transfer);
+};
+
+const getActiveUploadSessionByTransferId = async (transferId: string, userId: string) => {
+  const existingSession = findUploadSessionByTransferId(transferId, userId);
+  if (existingSession) {
+    return existingSession;
+  }
+
+  const db = await loadDb();
+  const transfer = getOwnedTransfer(db, userId, transferId);
+  if (!transfer?.uploadSessionId || transfer.transferStatus !== "in_progress") {
+    return null;
+  }
+
+  return createPendingUploadSession(transfer);
+};
+
+const removeStoredTransferArtifacts = async (transfer?: FileTransferRecord | null) => {
+  if (!transfer?.filePath) return;
+
+  if (transfer.storageMode === "chunked") {
+    const chunkTotal = transfer.uploadTotalChunks || 0;
+    const chunkPaths = Array.from({ length: chunkTotal }, (_, index) =>
+      getChunkStoragePath(transfer.filePath!, index),
+    );
+    if (chunkPaths.length > 0) {
+      const { error } = await supabase.storage.from(FILE_BUCKET).remove(chunkPaths);
+      if (error) {
+        console.error("Supabase Storage chunk delete error:", error);
+      }
+    }
+    return;
+  }
+
+  const { error } = await supabase.storage
+    .from(FILE_BUCKET)
+    .remove([ensureRelativeStoragePath(transfer.filePath)]);
+  if (error) {
+    console.error("Supabase Storage delete error:", error);
+  }
+};
+
 const removeStoredTransferFile = async (filePath?: string | null) => {
   if (!filePath) return;
   const { error } = await supabase.storage
@@ -710,6 +811,35 @@ const cleanupStaleUploadSessions = async () => {
   }
 
   if (dbChanged) {
+    await saveDb(db);
+  }
+
+  const persistedStaleTransfers = db.fileTransfers.filter(
+    (transfer) =>
+      transfer.transferStatus === "in_progress" &&
+      Boolean(transfer.uploadSessionId) &&
+      new Date(transfer.uploadUpdatedAt || transfer.createdAt).getTime() < cutoff,
+  );
+
+  if (persistedStaleTransfers.length === 0) {
+    return;
+  }
+
+  let persistedDbChanged = false;
+  for (const transfer of persistedStaleTransfers) {
+    const activeSession = transfer.uploadSessionId ? uploadSessions.get(transfer.uploadSessionId) : null;
+    if (activeSession) {
+      await cleanupUploadSession(activeSession);
+    }
+
+    await removeStoredTransferArtifacts(transfer);
+
+    transfer.transferStatus = "failed";
+    transfer.completedAt = nowIso();
+    persistedDbChanged = true;
+  }
+
+  if (persistedDbChanged) {
     await saveDb(db);
   }
 };
@@ -1725,6 +1855,12 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
     transferMethod: parsed.data.transferMethod,
     createdAt: session.createdAt,
     filePath: storagePath,
+    storageMode: "chunked",
+    uploadSessionId: session.id,
+    uploadTempDir: tempDir,
+    uploadChunkSize: session.chunkSize,
+    uploadTotalChunks: session.totalChunks,
+    uploadUpdatedAt: session.updatedAt,
   };
 
   db.fileTransfers = [transfer, ...db.fileTransfers.filter((entry) => entry.id !== transfer.id)];
@@ -1750,7 +1886,7 @@ app.get("/api/file-transfers/upload-status/:uploadId", fileListLimiter, requireA
     return;
   }
 
-  const session = uploadSessions.get(uploadId);
+  const session = await getActiveUploadSessionById(uploadId, req.auth!.userId);
   if (!session || session.userId !== req.auth!.userId) {
     res.status(404).json({ error: "Upload session not found" });
     return;
@@ -1780,7 +1916,7 @@ app.delete("/api/file-transfers/upload-session/:uploadId", uploadLimiter, requir
     return;
   }
 
-  const session = uploadSessions.get(uploadId);
+  const session = await getActiveUploadSessionById(uploadId, req.auth!.userId);
   if (!session || session.userId !== req.auth!.userId) {
     res.status(404).json({ error: "Upload session not found" });
     return;
@@ -1808,7 +1944,7 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
     return;
   }
 
-  const session = uploadSessions.get(parsed.data["x-upload-id"]);
+  const session = await getActiveUploadSessionById(parsed.data["x-upload-id"], req.auth!.userId);
   if (!session || session.userId !== req.auth!.userId) {
     res.status(404).json({ error: "Upload session not found" });
     return;
@@ -1833,6 +1969,21 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
   const existingChunkIndices = await getUploadedChunkIndices(session);
   if (existingChunkIndices.includes(chunkIndex)) {
     session.updatedAt = nowIso();
+    const db = await loadDb();
+    const transfer = db.fileTransfers.find(
+      (entry) => entry.id === session.transferId && entry.userId === req.auth!.userId,
+    );
+    if (transfer) {
+      transfer.uploadSessionId = session.id;
+      transfer.uploadTempDir = session.tempDir;
+      transfer.uploadChunkSize = session.chunkSize;
+      transfer.uploadTotalChunks = session.totalChunks;
+      transfer.uploadUpdatedAt = session.updatedAt;
+      if (!transfer.storageMode) {
+        transfer.storageMode = "chunked";
+      }
+      await saveDb(db);
+    }
     res.status(200).json({
       uploadId: session.id,
       chunkIndex,
@@ -1889,6 +2040,23 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
 
   session.uploadedChunks.add(chunkIndex);
   session.updatedAt = nowIso();
+  {
+    const db = await loadDb();
+    const transfer = db.fileTransfers.find(
+      (entry) => entry.id === session.transferId && entry.userId === req.auth!.userId,
+    );
+    if (transfer) {
+      transfer.uploadSessionId = session.id;
+      transfer.uploadTempDir = session.tempDir;
+      transfer.uploadChunkSize = session.chunkSize;
+      transfer.uploadTotalChunks = session.totalChunks;
+      transfer.uploadUpdatedAt = session.updatedAt;
+      if (!transfer.storageMode) {
+        transfer.storageMode = "chunked";
+      }
+      await saveDb(db);
+    }
+  }
   res.status(201).json({
     uploadId: session.id,
     chunkIndex,
@@ -1904,7 +2072,7 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
     return;
   }
 
-  const session = uploadSessions.get(uploadId);
+  const session = await getActiveUploadSessionById(uploadId, req.auth!.userId);
   if (!session || session.userId !== req.auth!.userId) {
     res.status(404).json({ error: "Upload session not found" });
     return;
@@ -1940,24 +2108,6 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
           throw new Error("Upload is still missing one or more chunks.");
         }
 
-        const assembledPath = path.join(session.tempDir, "assembled-upload.bin");
-        await new Promise<void>((resolve, reject) => {
-          const output = createWriteStream(assembledPath);
-          const appendNext = (index: number) => {
-            if (index >= uploadedChunkIndices.length) {
-              output.end();
-              return;
-            }
-            const input = createReadStream(getUploadChunkPath(session, uploadedChunkIndices[index]));
-            input.on("error", reject);
-            input.on("end", () => appendNext(index + 1));
-            input.pipe(output, { end: false });
-          };
-          output.on("finish", resolve);
-          output.on("error", reject);
-          appendNext(0);
-        });
-
         const scanResult = await scanUploadedPayload(
           session.fileName,
           sanitizeMimeType(session.fileType),
@@ -1967,26 +2117,119 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
           throw new Error("The uploaded file failed security scanning.");
         }
 
-        const fileBuffer = await readFile(assembledPath);
-        const fileValidationError = await validateUploadedFileBuffer(
-          fileBuffer,
-          sanitizeMimeType(session.fileType),
-          session.fileSize,
+        const currentDb = await loadDb();
+        const currentTransfer = currentDb.fileTransfers.find(
+          (entry) => entry.id === session.transferId && entry.userId === req.auth!.userId,
         );
-        if (fileValidationError) {
-          throw new Error(fileValidationError);
-        }
 
-        const { error: uploadError } = await supabase.storage
-          .from(FILE_BUCKET)
-          .upload(ensureRelativeStoragePath(session.storagePath), fileBuffer, {
-            contentType: sanitizeMimeType(session.fileType),
-            upsert: false,
+        const transfer = currentTransfer || ({
+          id: session.transferId,
+          userId: req.auth!.userId,
+          senderDeviceId: session.senderDeviceId,
+          receiverDeviceId: session.receiverDeviceId,
+          fileName: session.fileName,
+          fileSize: session.fileSize,
+          fileType: session.fileType,
+          transferStatus: "in_progress",
+          transferMethod: session.transferMethod,
+          createdAt: session.createdAt,
+          filePath: session.storagePath,
+        } as FileTransferRecord);
+
+        if (session.fileSize > CHUNKED_STORAGE_FINALIZE_THRESHOLD_BYTES) {
+          const uploadedChunkPaths: string[] = [];
+          try {
+            for (const chunkIndex of uploadedChunkIndices) {
+              const chunkPath = getUploadChunkPath(session, chunkIndex);
+              const chunkBuffer = await readFile(chunkPath);
+              const storageChunkPath = getChunkStoragePath(session.storagePath, chunkIndex);
+              const { error: chunkUploadError } = await supabase.storage
+                .from(FILE_BUCKET)
+                .upload(storageChunkPath, chunkBuffer, {
+                  contentType: "application/octet-stream",
+                  upsert: false,
+                });
+
+              if (chunkUploadError) {
+                throw new Error(`Failed to store upload chunk ${chunkIndex + 1}: ${chunkUploadError.message}`);
+              }
+
+              uploadedChunkPaths.push(storageChunkPath);
+            }
+          } catch (error) {
+            if (uploadedChunkPaths.length > 0) {
+              await supabase.storage.from(FILE_BUCKET).remove(uploadedChunkPaths).catch(() => undefined);
+            }
+            throw error;
+          }
+
+          transfer.transferStatus = "completed";
+          transfer.completedAt = nowIso();
+          transfer.filePath = session.storagePath;
+          transfer.storageMode = "chunked";
+          transfer.uploadSessionId = session.id;
+          transfer.uploadTempDir = session.tempDir;
+          transfer.uploadChunkSize = session.chunkSize;
+          transfer.uploadTotalChunks = session.totalChunks;
+          transfer.uploadUpdatedAt = nowIso();
+        } else {
+          const assembledPath = path.join(session.tempDir, "assembled-upload.bin");
+          await new Promise<void>((resolve, reject) => {
+            const output = createWriteStream(assembledPath);
+            const appendNext = (index: number) => {
+              if (index >= uploadedChunkIndices.length) {
+                output.end();
+                return;
+              }
+              const input = createReadStream(getUploadChunkPath(session, uploadedChunkIndices[index]));
+              input.on("error", reject);
+              input.on("end", () => appendNext(index + 1));
+              input.pipe(output, { end: false });
+            };
+            output.on("finish", resolve);
+            output.on("error", reject);
+            appendNext(0);
           });
 
-        if (uploadError) {
-          throw new Error(`Failed to store assembled upload: ${uploadError.message}`);
+          const fileBuffer = await readFile(assembledPath);
+          const fileValidationError = await validateUploadedFileBuffer(
+            fileBuffer,
+            sanitizeMimeType(session.fileType),
+            session.fileSize,
+          );
+          if (fileValidationError) {
+            throw new Error(fileValidationError);
+          }
+
+          const { error: uploadError } = await supabase.storage
+            .from(FILE_BUCKET)
+            .upload(ensureRelativeStoragePath(session.storagePath), fileBuffer, {
+              contentType: sanitizeMimeType(session.fileType),
+              upsert: false,
+            });
+
+          if (uploadError) {
+            throw new Error(`Failed to store assembled upload: ${uploadError.message}`);
+          }
+
+          transfer.transferStatus = "completed";
+          transfer.completedAt = nowIso();
+          transfer.filePath = session.storagePath;
+          transfer.storageMode = "single";
+          transfer.uploadSessionId = session.id;
+          transfer.uploadTempDir = session.tempDir;
+          transfer.uploadChunkSize = session.chunkSize;
+          transfer.uploadTotalChunks = session.totalChunks;
+          transfer.uploadUpdatedAt = nowIso();
         }
+
+        currentDb.fileTransfers = [
+          transfer,
+          ...currentDb.fileTransfers.filter((entry) => entry.id !== transfer.id),
+        ];
+        await saveDb(currentDb);
+        await cleanupUploadSession(session);
+        return transfer;
       }
 
       const currentDb = await loadDb();
@@ -2186,6 +2429,7 @@ app.post("/api/file-transfers/upload", uploadLimiter, requireAuth, requireCsrf, 
     createdAt: nowIso(),
     completedAt: nowIso(),
     filePath: storagePath, // Supabase Storage path
+    storageMode: "single",
   };
 
   db.fileTransfers.unshift(transfer);
@@ -2279,6 +2523,7 @@ app.post("/api/file-transfers", uploadLimiter, requireAuth, requireCsrf, async (
       createdAt: nowIso(),
       completedAt: nowIso(),
       filePath: storagePath,
+      storageMode: "single",
     };
 
     db.fileTransfers.unshift(transfer);
@@ -2319,20 +2564,76 @@ app.patch("/api/file-transfers/:id", syncLimiter, requireAuth, requireCsrf, asyn
       transfer.completedAt = nowIso();
     }
     if (req.body.transfer_status === "cancelled") {
-      const activeSession = findUploadSessionByTransferId(transfer.id, req.auth!.userId);
+      const activeSession = await getActiveUploadSessionByTransferId(transfer.id, req.auth!.userId);
       await cleanupUploadSession(activeSession);
-      await removeStoredTransferFile(transfer.filePath);
+      await removeStoredTransferArtifacts(transfer);
     }
   }
   await saveDb(db);
   res.json(transfer);
 });
 
-const getTransferDownloadLink = async (userId: string, transferId: string, action: "download" | "preview" = "download") => {
+const writeResponseBuffer = async (res: Response, buffer: Buffer) => {
+  if (res.write(buffer)) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    res.once("drain", resolve);
+  });
+};
+
+const streamChunkedTransferDownload = async (
+  res: Response,
+  transfer: FileTransferRecord,
+  action: "download" | "preview" = "download",
+) => {
+  if (!transfer.filePath || !transfer.uploadTotalChunks) {
+    throw new Error("Chunked transfer metadata is incomplete.");
+  }
+
+  res.status(200);
+  res.setHeader("Content-Type", sanitizeMimeType(transfer.fileType));
+  res.setHeader(
+    "Content-Disposition",
+    `${action === "preview" ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(transfer.fileName)}`,
+  );
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Transfer-Mode", "chunked");
+  res.setHeader("Content-Length", String(transfer.fileSize));
+
+  for (let chunkIndex = 0; chunkIndex < transfer.uploadTotalChunks; chunkIndex += 1) {
+    const chunkPath = getChunkStoragePath(transfer.filePath, chunkIndex);
+    const { data, error } = await supabase.storage.from(FILE_BUCKET).download(chunkPath);
+    if (error || !data) {
+      throw new Error(`Could not read stored chunk ${chunkIndex + 1}.`);
+    }
+
+    const chunkBuffer = Buffer.from(await data.arrayBuffer());
+    await writeResponseBuffer(res, chunkBuffer);
+  }
+
+  res.end();
+};
+
+const getTransferDownloadLink = async (
+  req: AuthenticatedRequest,
+  userId: string,
+  transferId: string,
+  action: "download" | "preview" = "download",
+) => {
   const db = await loadDb();
   const transfer = getOwnedTransfer(db, userId, transferId);
   if (!transfer?.filePath) {
     return { error: "File not found" as const };
+  }
+
+  if (transfer.storageMode === "chunked") {
+    const previewQuery = action === "preview" ? "?action=preview" : "";
+    return {
+      transfer,
+      signedUrl: `${getAppBaseUrl(req)}/api/file-transfers/${transfer.id}/download${previewQuery}`,
+    };
   }
 
   const { data, error } = await supabase.storage
@@ -2355,7 +2656,7 @@ const getTransferDownloadLink = async (userId: string, transferId: string, actio
 app.get("/api/file-transfers/:id/download-link", fileListLimiter, requireAuth, async (req: AuthenticatedRequest, res) => {
   const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const action = req.query.action === "preview" ? "preview" : "download";
-  const result = await getTransferDownloadLink(req.auth!.userId, transferId, action);
+  const result = await getTransferDownloadLink(req, req.auth!.userId, transferId, action);
   if ("error" in result) {
     res.status(result.error === "File not found" ? 404 : 500).json({ error: result.error });
     return;
@@ -2369,7 +2670,29 @@ app.get("/api/file-transfers/:id/download-link", fileListLimiter, requireAuth, a
 
 app.get("/api/file-transfers/:id/download", fileListLimiter, requireAuth, async (req: AuthenticatedRequest, res) => {
   const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-  const result = await getTransferDownloadLink(req.auth!.userId, transferId);
+  const action = req.query.action === "preview" ? "preview" : "download";
+  const db = await loadDb();
+  const transfer = getOwnedTransfer(db, req.auth!.userId, transferId);
+  if (!transfer?.filePath) {
+    res.status(404).json({ error: "File not found" });
+    return;
+  }
+
+  if (transfer.storageMode === "chunked") {
+    try {
+      await streamChunkedTransferDownload(res, transfer, action);
+    } catch (error) {
+      console.error("Chunked transfer download error:", error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Could not generate download link" });
+      } else {
+        res.destroy();
+      }
+    }
+    return;
+  }
+
+  const result = await getTransferDownloadLink(req, req.auth!.userId, transferId, action);
   if ("error" in result) {
     res.status(result.error === "File not found" ? 404 : 500).json({ error: result.error });
     return;
@@ -2666,9 +2989,9 @@ app.delete("/api/file-transfers/:id", syncLimiter, requireAuth, requireCsrf, asy
   const db = await loadDb();
   const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const transfer = getOwnedTransfer(db, req.auth!.userId, transferId);
-  const activeSession = findUploadSessionByTransferId(transferId, req.auth!.userId);
+  const activeSession = await getActiveUploadSessionByTransferId(transferId, req.auth!.userId);
   await cleanupUploadSession(activeSession);
-  await removeStoredTransferFile(transfer?.filePath);
+  await removeStoredTransferArtifacts(transfer);
   db.fileTransfers = db.fileTransfers.filter(
     (entry) => !(entry.id === transferId && entry.userId === req.auth!.userId),
   );
