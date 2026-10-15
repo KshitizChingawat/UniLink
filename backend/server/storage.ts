@@ -114,7 +114,12 @@ export const loadDb = async (): Promise<AppDatabase> => {
     return normalizeDb(raw ? (JSON.parse(raw) as Partial<AppDatabase>) : null);
   } catch {
     const nextDb = { ...initialDb };
-    await writeDb(JSON.stringify(nextDb, null, 2));
+    try {
+      await writeDb(JSON.stringify(nextDb, null, 2));
+    } catch {
+      // Storage backend unavailable — fall back to an in-memory database.
+      // Writes will be lost on restart, but reads will return an empty state.
+    }
     return nextDb;
   }
 };
@@ -128,7 +133,11 @@ export const saveDb = async (db: AppDatabase): Promise<void> => {
       // already serializes mutations, and merging by id here causes deleted
       // records such as file transfers to be resurrected on the next save.
       const normalizedDb = normalizeDb(db);
-      await writeDb(JSON.stringify(normalizedDb, null, 2));
+      try {
+        await writeDb(JSON.stringify(normalizedDb, null, 2));
+      } catch {
+        // Storage backend unavailable — silently skip persistence.
+      }
     });
   await writeLock;
 };
