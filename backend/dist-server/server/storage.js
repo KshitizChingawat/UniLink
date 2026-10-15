@@ -13,6 +13,11 @@ const initialDb = {
     emailVerifications: [],
 };
 let writeLock = Promise.resolve();
+// In-memory fallback cache — used when the storage backend (Supabase) is unavailable.
+// This ensures data persists between requests during the process lifetime, enabling
+// OTP verification and registration to work without external storage.
+let memoryCache = null;
+let storageAvailable = true;
 const normalizeUser = (user) => ({
     ...user,
     plan: user.plan === "pro" ? "pro" : "free",
@@ -40,9 +45,12 @@ const normalizeDb = (raw) => ({
     pairSessions: raw?.pairSessions || [],
     emailVerifications: raw?.emailVerifications || [],
 });
-// no-op: kept so index.ts startup doesn't need to change
 export const ensureDataDirs = async () => { };
 export const createId = () => randomUUID();
+export const resetMemoryCache = () => {
+    memoryCache = null;
+    storageAvailable = true;
+};
 const readDb = async () => {
     const { data, error } = await supabase.storage
         .from(DB_BUCKET)
@@ -92,23 +100,35 @@ const mergeDb = (remote, local) => ({
     emailVerifications: sortByCreatedAt(mergeById(remote.emailVerifications, local.emailVerifications)),
 });
 export const loadDb = async () => {
+    // Return from in-memory cache if available and storage backend is still unreachable
+    if (memoryCache && !storageAvailable) {
+        return memoryCache;
+    }
     try {
         const raw = await readDb();
-        return normalizeDb(raw ? JSON.parse(raw) : null);
+        storageAvailable = true;
+        const db = normalizeDb(raw ? JSON.parse(raw) : null);
+        memoryCache = db;
+        return db;
     }
     catch {
-        const nextDb = { ...initialDb };
+        storageAvailable = false;
+        // Fall back to in-memory cache, or create a fresh empty database
+        const nextDb = memoryCache ?? { ...initialDb };
+        memoryCache = nextDb;
         try {
             await writeDb(JSON.stringify(nextDb, null, 2));
         }
         catch {
             // Storage backend unavailable — fall back to an in-memory database.
-            // Writes will be lost on restart, but reads will return an empty state.
+            // Writes will be lost on restart, but reads will return a cached state.
         }
         return nextDb;
     }
 };
 export const saveDb = async (db) => {
+    // Always keep in-memory cache in sync
+    memoryCache = normalizeDb(db);
     // Chain writes so they never run in parallel
     writeLock = writeLock
         .catch(() => undefined)
