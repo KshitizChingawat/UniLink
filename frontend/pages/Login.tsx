@@ -160,7 +160,7 @@ const Login = () => {
 
           <form onSubmit={handleSubmit} className="space-y-3 sm:space-y-4">
             <div>
-              <Label htmlFor="email">Email address</Label>
+              <Label htmlFor="email" className="text-slate-300">Email address</Label>
               <Input
                 id="email"
                 type="email"
@@ -181,7 +181,7 @@ const Login = () => {
                   }
                 }}
                 placeholder="Enter your email"
-                className="mt-1"
+                className="mt-1 bg-white/5 border-white/20 placeholder:text-slate-500 focus:border-sky-400/50 text-white"
                 autoComplete="email"
                 required
               />
@@ -191,12 +191,12 @@ const Login = () => {
                 ))}
               </datalist>
               {!emailLooksValid && (
-                <p className="mt-2 text-sm text-red-600">Enter a valid email address</p>
+                <p className="mt-2 text-sm text-red-400">Enter a valid email address</p>
               )}
             </div>
 
             <div>
-              <Label htmlFor="password">Password</Label>
+              <Label htmlFor="password" className="text-slate-300">Password</Label>
               <div className="relative mt-1">
                 <Input
                   id="password"
@@ -204,13 +204,13 @@ const Login = () => {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="Enter your password"
-                  className="pr-10"
+                  className="bg-white/5 border-white/20 placeholder:text-slate-500 focus:border-sky-400/50 text-white pr-10"
                   required
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  className="absolute right-3 top-1/2 transform -translate-y-1/2 text-slate-400 hover:text-white"
                 >
                   {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
@@ -224,7 +224,7 @@ const Login = () => {
                   checked={rememberMe}
                   onCheckedChange={(checked) => setRememberMe(checked as boolean)}
                 />
-                <Label htmlFor="remember-me" className="text-sm text-gray-600">
+                  <Label htmlFor="remember-me" className="text-sm text-slate-300">
                   Remember me
                 </Label>
               </div>
@@ -310,6 +310,7 @@ const Login = () => {
               value={forgotEmail}
               onChange={(e) => setForgotEmail(e.target.value)}
               placeholder="Enter your email"
+              className="mt-1"
             />
           </div>
           <DialogFooter>
