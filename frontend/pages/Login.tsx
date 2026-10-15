@@ -9,7 +9,7 @@ import { Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import Logo from '@/components/Logo';
 import AnimatedToggle from '@/components/ui/animated-toggle';
-import LoginSignalScene from '@/components/login/LoginSignalScene';
+import GenerativeArtSceneV3 from '@/components/ui/quantum-nebula';
 import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { apiFetch } from '@/lib/api';
@@ -123,11 +123,12 @@ const Login = () => {
 
   return (
     <div className="relative flex min-h-[100dvh] items-center justify-center overflow-hidden bg-[#06111f] px-3 py-4 font-['Bahnschrift','Segoe_UI',sans-serif] sm:px-4 sm:py-5">
-      <div className="pointer-events-none absolute inset-0 overflow-hidden bg-[radial-gradient(circle_at_50%_42%,rgba(14,165,233,0.34),transparent_32%),linear-gradient(135deg,#071527_0%,#10375c_42%,#16203c_72%,#2c1651_100%)]">
-        <LoginSignalScene />
-        <div className="absolute inset-0 bg-[linear-gradient(115deg,rgba(255,255,255,0.12)_0%,transparent_22%,transparent_68%,rgba(56,189,248,0.16)_100%)]" />
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,transparent_0%,rgba(2,6,23,0.16)_54%,rgba(2,6,23,0.58)_100%)]" />
+      <div className="pointer-events-none absolute inset-0 overflow-hidden bg-[radial-gradient(circle_at_50%_42%,rgba(6,172,241,0.4),transparent_32%),linear-gradient(160deg,#071527_0%,#10375c_42%,#16203c_72%,#2c1651_100%)]">
+        <GenerativeArtSceneV3 />
+        <div className="absolute inset-0 bg-[linear-gradient(115deg,rgba(6,172,241,0.15)_0%,transparent_22%,transparent_68%,rgba(56,189,248,0.2)_100%)]" />
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,transparent_0%,rgba(2,6,23,0.25)_54%,rgba(2,6,23,0.7)_100%)]" />
         <div className="absolute inset-0 opacity-[0.13] [background-image:linear-gradient(rgba(255,255,255,0.18)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.14)_1px,transparent_1px)] [background-size:48px_48px]" />
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,rgba(147,51,234,0.12)_0%,transparent_50%),radial-gradient(ellipse_at_bottom,rgba(236,72,153,0.08)_0%,transparent_50%)]" />
       </div>
       <div className="relative z-10 flex w-full max-w-[27rem] items-center justify-center">
         {/* Login Card */}
