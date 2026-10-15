@@ -127,8 +127,6 @@ const Login = () => {
         <GenerativeArtSceneV3 />
         <div className="absolute inset-0 bg-[linear-gradient(115deg,rgba(6,172,241,0.15)_0%,transparent_22%,transparent_68%,rgba(56,189,248,0.2)_100%)]" />
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,transparent_0%,rgba(2,6,23,0.25)_54%,rgba(2,6,23,0.7)_100%)]" />
-        <div className="absolute inset-0 opacity-[0.13] [background-image:linear-gradient(rgba(255,255,255,0.18)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.14)_1px,transparent_1px)] [background-size:48px_48px]" />
-        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,rgba(147,51,234,0.12)_0%,transparent_50%),radial-gradient(ellipse_at_bottom,rgba(236,72,153,0.08)_0%,transparent_50%)]" />
       </div>
       <div className="relative z-10 flex w-full max-w-[27rem] items-center justify-center">
         {/* Login Card */}
