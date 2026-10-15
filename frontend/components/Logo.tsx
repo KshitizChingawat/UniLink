@@ -24,7 +24,7 @@ const Logo = ({ size = 'md', showText = true, className = '' }: LogoProps) => {
     <div className={`flex items-center space-x-3 ${className}`}>
       <div className={`${sizeClasses[size]} relative`}>
         {/* Outer ring representing connectivity */}
-        <div className="absolute inset-0 rounded-full border-3 border-gradient-to-r from-unilink-500 to-unilink-700 animate-pulse">
+        <div className="absolute inset-0 rounded-full border-2 border-unilink-500 animate-pulse">
           <div className="w-full h-full rounded-full bg-gradient-to-br from-unilink-500 via-blue-500 to-purple-600 p-1">
             {/* Inner circle representing unified connection */}
             <div className="w-full h-full rounded-full bg-white flex items-center justify-center">
@@ -41,7 +41,7 @@ const Logo = ({ size = 'md', showText = true, className = '' }: LogoProps) => {
         </div>
       </div>
       {showText && (
-        <span className={`font-bold text-gray-900 dark:text-white ${textSizeClasses[size]}`}>
+        <span className={`font-bold text-white ${textSizeClasses[size]}`}>
           Uni<span className="text-unilink-600">Link</span>
         </span>
       )}
