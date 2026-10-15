@@ -181,7 +181,8 @@ const Login = () => {
                   }
                 }}
                 placeholder="Enter your email"
-                className="mt-1 bg-white/5 border-white/20 placeholder:text-slate-500 focus:border-sky-400/50 text-white"
+                className="mt-1 bg-white/5 border border-white/20 placeholder:text-slate-500/50 focus:border-sky-400/50 text-white disabled:cursor-not-allowed md:text-sm"
+                style={{ backgroundColor: 'rgba(255,255,255,0.05)', color: 'white', borderColor: 'rgba(255,255,255,0.2)' }}
                 autoComplete="email"
                 required
               />
@@ -204,7 +205,8 @@ const Login = () => {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="Enter your password"
-                  className="bg-white/5 border-white/20 placeholder:text-slate-500 focus:border-sky-400/50 text-white pr-10"
+                  className="bg-white/5 border border-white/20 placeholder:text-slate-500/50 focus:border-sky-400/50 text-white disabled:cursor-not-allowed md:text-sm pr-10"
+                  style={{ backgroundColor: 'rgba(255,255,255,0.05)', color: 'white', borderColor: 'rgba(255,255,255,0.2)' }}
                   required
                 />
                 <button
