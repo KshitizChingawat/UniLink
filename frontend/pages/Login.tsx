@@ -130,18 +130,32 @@ const Login = () => {
       </div>
       <div className="relative z-10 flex w-full max-w-[27rem] items-center justify-center">
         {/* Login Card */}
-        <div className="relative flex w-full flex-col justify-center overflow-hidden rounded-[1.35rem] border border-white/55 bg-white/[0.92] px-5 py-4 shadow-[0_28px_90px_rgba(2,6,23,0.34)] backdrop-blur-2xl sm:px-6 sm:py-5">
-          <div className="pointer-events-none absolute inset-x-6 top-0 h-px bg-gradient-to-r from-transparent via-white to-transparent" />
-          <div className="pointer-events-none absolute -right-24 -top-24 h-48 w-48 rounded-full bg-cyan-200/20 blur-3xl" />
-          <div className="pointer-events-none absolute -bottom-24 left-8 h-44 w-44 rounded-full bg-blue-300/20 blur-3xl" />
+        <div 
+          className="relative flex w-full flex-col justify-center overflow-hidden rounded-[1.35rem] border border-white/20 bg-black/[0.45] px-5 py-4 shadow-[0_8px_32px_rgba(6,172,241,0.15)] backdrop-blur-xl sm:px-6 sm:py-5"
+          style={{
+            '--background': '222.2 47.4% 11.2%',
+            '--foreground': '210 40% 98%',
+            '--card': '222.2 47.4% 14.2%',
+            '--card-foreground': '210 40% 98%',
+            '--border': '217.2 32.6% 21.5%',
+            '--input': '217.2 32.6% 21.5%',
+            '--ring': '221.2 83.2% 53.3%',
+            '--primary': '221.2 83.2% 53.3%',
+          } as React.CSSProperties}
+        >
+          <div className="pointer-events-none absolute inset-x-6 top-0 h-px bg-[linear-gradient(90deg,transparent,rgba(56,189,248,0.4),transparent)]" />
+          <div className="pointer-events-none absolute -right-24 -top-24 h-48 w-48 rounded-full bg-cyan-400/10 blur-3xl" />
+          <div className="pointer-events-none absolute -bottom-24 left-8 h-44 w-44 rounded-full bg-blue-400/10 blur-3xl" />
+          {/* Frosted glass inner glow */}
+          <div className="pointer-events-none absolute inset-0 rounded-[1.35rem] bg-[radial-gradient(ellipse_at_top,rgba(255,255,255,0.06)_0%,transparent_60%),radial-gradient(ellipse_at_bottom,rgba(147,51,234,0.05)_0%,transparent_60%)]" />
           {/* Logo */}
           <div className="mb-3.5 text-center sm:mb-5">
             <div className="mb-2 flex justify-center sm:mb-2.5">
               <Logo size="md" showText={false} />
             </div>
             
-            <h1 className="text-[1.55rem] font-black leading-tight text-slate-950 sm:text-[2rem]">Welcome back</h1>
-            <p className="mt-1 text-sm font-medium text-slate-500 sm:mt-1.5 sm:text-[15px]">Sign in to your UniLink account</p>
+            <h1 className="text-[1.55rem] font-black leading-tight text-white sm:text-[2rem]">Welcome back</h1>
+            <p className="mt-1 text-sm font-medium text-slate-300 sm:mt-1.5 sm:text-[15px]">Sign in to your UniLink account</p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-3 sm:space-y-4">
@@ -220,13 +234,13 @@ const Login = () => {
                   setForgotEmail(email);
                   setForgotOpen(true);
                 }}
-                className="text-sm font-medium text-unilink-600 transition-colors hover:text-unilink-700"
+                className="text-sm font-medium text-sky-400 transition-colors hover:text-sky-300"
               >
                 Forgot password?
               </button>
             </div>
 
-            <div className="rounded-[1.15rem] border border-cyan-200/70 bg-[linear-gradient(145deg,rgba(239,246,255,0.92),rgba(255,255,255,0.62))] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.88),0_18px_45px_rgba(37,99,235,0.12)] sm:px-4 sm:py-3.5">
+            <div className="rounded-[1.15rem] border border-white/10 bg-[linear-gradient(145deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03))] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_18px_45px_rgba(6,172,241,0.12)] sm:px-4 sm:py-3.5">
               <AnimatedToggle
                 canActivate={Boolean(email.trim() && password.trim())}
                 isSubmitting={loading}
@@ -240,9 +254,9 @@ const Login = () => {
           </form>
 
           <div className="mt-3.5 text-center sm:mt-4">
-            <p className="text-sm text-gray-600 sm:text-base">
+            <p className="text-sm text-gray-300 sm:text-base">
               Don't have an account?{' '}
-              <Link to="/register" className="text-unilink-600 hover:text-unilink-700 font-semibold">
+              <Link to="/register" className="text-sky-400 hover:text-sky-300 font-semibold">
                 Sign up
               </Link>
             </p>
@@ -252,15 +266,15 @@ const Login = () => {
           <div className="mt-3.5 sm:mt-4">
             <div className="relative">
               <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-gray-300" />
+                <div className="w-full border-t border-gray-600" />
               </div>
               <div className="relative flex justify-center text-sm">
-                <span className="px-2 bg-white text-gray-500">Or continue with</span>
+                <span className="px-2 bg-black/[0.45] text-gray-400">Or continue with</span>
               </div>
             </div>
 
             <div className="mt-3 grid grid-cols-2 gap-2.5 sm:mt-3.5 sm:gap-3">
-              <Button variant="outline" type="button" className="h-9 w-full text-sm sm:h-10" onClick={handleGoogleLogin} disabled={loading}>
+              <Button variant="outline" type="button" className="h-9 w-full border-gray-600 bg-black/[0.3] text-gray-200 hover:bg-gray-800/50 text-sm sm:h-10" onClick={handleGoogleLogin} disabled={loading}>
                 <svg className="w-4 h-4 mr-2" viewBox="0 0 24 24">
                   <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
                   <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
@@ -269,7 +283,7 @@ const Login = () => {
                 </svg>
                 Google
               </Button>
-              <Button variant="outline" type="button" className="h-9 w-full text-sm sm:h-10" onClick={() => toast.info('Facebook login is coming soon.')}>
+              <Button variant="outline" type="button" className="h-9 w-full border-gray-600 bg-black/[0.3] text-gray-200 hover:bg-gray-800/50 text-sm sm:h-10" onClick={() => toast.info('Facebook login is coming soon.')}>
                 <svg className="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 24 24">
                   <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
                 </svg>
