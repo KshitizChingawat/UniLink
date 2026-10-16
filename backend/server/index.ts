@@ -4,8 +4,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { fileTypeFromBuffer } from "file-type";
 import { randomInt, randomUUID } from "node:crypto";
-import { createWriteStream } from "node:fs";
-import { mkdir, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -14,7 +13,7 @@ import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
 import { isEmailVerificationConfigured, isMailtrapDemoRestrictionError, sendRegistrationOtp } from "./mailer.js";
 import { clearAuthCookies, comparePassword, createCsrfToken, hashPassword, requireAuth, requireCsrf, revokeToken, sanitizeUser, setAuthCookies, signAuthToken, signScopedToken, type AuthenticatedRequest } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
-import { containsNullBytes, ensureRelativeStoragePath, escapeHtml, isZipBombCandidate, nowIso, sanitizeFilename, sanitizeMimeType, sanitizeTextInput } from "./helpers.js";
+import { containsNullBytes, ensureRelativeStoragePath, escapeHtml, isZipBombCandidate, nowIso, parseRangeHeader, planChunkedByteRange, sanitizeFilename, sanitizeMimeType, sanitizeTextInput } from "./helpers.js";
 import { createId, ensureDataDirs, loadDb, saveDb } from "./storage.js";
 import type { AiSuggestionRecord, BluetoothDeviceRecord, ClipboardRecord, DeviceRecord, EmailVerificationRecord, FileTransferRecord, PairSessionRecord, UserRecord, VaultRecord } from "./types.js";
 import { appConfig } from "./config.js";
@@ -134,10 +133,11 @@ const syncLimiter = rateLimit({
   message: { error: "Too many sync requests. Please try again later." },
 });
 const uploadLimiter = rateLimit({
-  // Chunked uploads legitimately create many requests, so keep abuse protection
-  // without throttling normal medium/large file transfers.
+  // Chunked uploads legitimately create many requests (a 10 GB file is ~1280
+  // chunks plus retries), so keep abuse protection without throttling normal
+  // medium/large file transfers.
   windowMs: 15 * 60 * 1000,
-  max: 1500,
+  max: 5000,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many upload requests. Please wait before uploading again." },
@@ -374,10 +374,19 @@ interface PendingUploadSession {
   uploadedChunks: Set<number>;
   isCompleting?: boolean;
   isDirectUpload?: boolean;
+  // Throttles full-database progress rewrites: per-chunk state already lives in
+  // memory (`uploadedChunks`), so the DB copy is only refreshed periodically.
+  lastPersistedAt?: string;
 }
 
 const uploadSessions = new Map<string, PendingUploadSession>();
-const LARGE_UPLOAD_CHUNK_BYTES = 50 * 1024 * 1024;
+// 8 MB chunks keep every hop fast: the browser uploads 4+ in parallel, each
+// Supabase PUT stays small (quick TTFB, cheap retries), per-chunk RAM is tiny,
+// and downloads/previews can start after fetching a single small chunk.
+const LARGE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+// Minimum gap between full-database progress rewrites for an active upload.
+// Progress is authoritative in memory; the DB copy only aids crash recovery.
+const CHUNK_PROGRESS_PERSIST_INTERVAL_MS = 15_000;
 const UPLOAD_TEMP_ROOT = path.join(os.tmpdir(), "unilink-upload-sessions");
 const UPLOAD_SESSION_STALE_MS = 30 * 60 * 1000;
 const UPLOAD_REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
@@ -652,9 +661,6 @@ const getOwnedTransfer = (
   transferId: string,
 ) => db.fileTransfers.find((entry) => entry.id === transferId && entry.userId === userId) || null;
 
-const getUploadChunkPath = (session: PendingUploadSession, chunkIndex: number) =>
-  path.join(session.tempDir, `${String(chunkIndex).padStart(6, "0")}.part`);
-
 const getUploadedChunkIndices = async (session: PendingUploadSession) => {
   if (session.uploadedChunks.size > 0) {
     return Array.from(session.uploadedChunks).sort((a, b) => a - b);
@@ -789,6 +795,38 @@ const removeStoredTransferFile = async (filePath?: string | null) => {
     .remove([ensureRelativeStoragePath(filePath)]);
   if (error) {
     console.error("Supabase Storage delete error:", error);
+  }
+};
+
+// Progress is authoritative in the in-memory session; the database copy only
+// aids crash recovery, so refresh it at most every
+// CHUNK_PROGRESS_PERSIST_INTERVAL_MS. Without this, a 10 GB upload would pay a
+// full database download + rewrite for each of its ~1280 chunks.
+const persistChunkProgress = async (session: PendingUploadSession, userId: string) => {
+  const now = Date.now();
+  if (
+    session.lastPersistedAt &&
+    now - Date.parse(session.lastPersistedAt) < CHUNK_PROGRESS_PERSIST_INTERVAL_MS
+  ) {
+    return;
+  }
+  session.lastPersistedAt = new Date(now).toISOString();
+
+  const db = await loadDb();
+  const transfer = db.fileTransfers.find(
+    (entry) => entry.id === session.transferId && entry.userId === userId,
+  );
+  if (transfer) {
+    transfer.uploadSessionId = session.id;
+    transfer.uploadTempDir = session.tempDir;
+    transfer.uploadChunkSize = session.chunkSize;
+    transfer.uploadTotalChunks = session.totalChunks;
+    transfer.uploadUploadedChunks = Array.from(session.uploadedChunks).sort((a, b) => a - b);
+    transfer.uploadUpdatedAt = session.updatedAt;
+    if (!transfer.storageMode) {
+      transfer.storageMode = "chunked";
+    }
+    await saveDb(db);
   }
 };
 
@@ -1977,21 +2015,7 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
   const existingChunkIndices = await getUploadedChunkIndices(session);
   if (existingChunkIndices.includes(chunkIndex)) {
     session.updatedAt = nowIso();
-    const db = await loadDb();
-    const transfer = db.fileTransfers.find(
-      (entry) => entry.id === session.transferId && entry.userId === req.auth!.userId,
-    );
-    if (transfer) {
-      transfer.uploadSessionId = session.id;
-      transfer.uploadTempDir = session.tempDir;
-      transfer.uploadChunkSize = session.chunkSize;
-      transfer.uploadTotalChunks = session.totalChunks;
-      transfer.uploadUpdatedAt = session.updatedAt;
-      if (!transfer.storageMode) {
-        transfer.storageMode = "chunked";
-      }
-      await saveDb(db);
-    }
+    await persistChunkProgress(session, req.auth!.userId);
     res.status(200).json({
       uploadId: session.id,
       chunkIndex,
@@ -2002,37 +2026,44 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
   }
 
   session.updatedAt = nowIso();
-  const chunkPath = getUploadChunkPath(session, chunkIndex);
+  // Collect the chunk straight into memory instead of spooling to temp disk and
+  // re-reading it. 8 MB bounds RAM per request and removes a full disk
+  // write + read round trip from every chunk's critical path.
+  const received: Buffer[] = [];
   let bytesWritten = 0;
+  let chunkTooLarge = false;
 
   try {
     await new Promise<void>((resolve, reject) => {
-      const output = createWriteStream(chunkPath);
       let settled = false;
 
       const rejectOnce = (error: Error) => {
         if (settled) return;
         settled = true;
-        output.destroy(error);
         reject(error);
       };
 
       req.on("data", (chunk: Buffer) => {
+        if (settled) return;
         bytesWritten += chunk.length;
         if (bytesWritten > expectedChunkSize) {
-          rejectOnce(new Error("Uploaded chunk exceeded the expected size."));
+          chunkTooLarge = true;
+          // Discard the surplus and keep draining (never destroy the socket)
+          // so the client still receives a clean 400 response below.
+          received.length = 0;
+          return;
         }
+        received.push(chunk);
       });
 
-      req.on("aborted", () => rejectOnce(new Error("Upload chunk was interrupted before completion.")));
-      req.on("error", (error) => rejectOnce(error));
-      output.on("error", (error) => rejectOnce(error));
-      output.on("finish", () => {
+      req.on("end", () => {
         if (settled) return;
         settled = true;
         resolve();
       });
-      req.pipe(output);
+
+      req.on("aborted", () => rejectOnce(new Error("Upload chunk was interrupted before completion.")));
+      req.on("error", (error) => rejectOnce(error));
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Chunk upload failed";
@@ -2040,54 +2071,35 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
     return;
   }
 
-  if (bytesWritten !== expectedChunkSize) {
-    await rm(chunkPath, { force: true }).catch(() => undefined);
+  if (chunkTooLarge || bytesWritten !== expectedChunkSize) {
     res.status(400).json({ error: "Uploaded chunk size did not match the expected size." });
     return;
   }
 
   try {
-    const chunkBuffer = await readFile(chunkPath);
+    const chunkBuffer = Buffer.concat(received);
     const storageChunkPath = getChunkStoragePath(session.storagePath, chunkIndex);
     const { error: chunkUploadError } = await supabase.storage
       .from(FILE_BUCKET)
       .upload(storageChunkPath, chunkBuffer, {
         contentType: "application/octet-stream",
-        upsert: false,
+        // Idempotent retries: re-sending an index overwrites identical bytes
+        // instead of failing, so resumed uploads never get stuck.
+        upsert: true,
       });
 
     if (chunkUploadError) {
       throw new Error(`Failed to store uploaded chunk: ${chunkUploadError.message}`);
     }
   } catch (error) {
-    await rm(chunkPath, { force: true }).catch(() => undefined);
     const message = error instanceof Error ? error.message : "Chunk upload failed";
     res.status(500).json({ error: message });
     return;
   }
 
-  await rm(chunkPath, { force: true }).catch(() => undefined);
-
   session.uploadedChunks.add(chunkIndex);
   session.updatedAt = nowIso();
-  {
-    const db = await loadDb();
-    const transfer = db.fileTransfers.find(
-      (entry) => entry.id === session.transferId && entry.userId === req.auth!.userId,
-    );
-    if (transfer) {
-      transfer.uploadSessionId = session.id;
-      transfer.uploadTempDir = session.tempDir;
-      transfer.uploadChunkSize = session.chunkSize;
-      transfer.uploadTotalChunks = session.totalChunks;
-      transfer.uploadUploadedChunks = Array.from(session.uploadedChunks).sort((a, b) => a - b);
-      transfer.uploadUpdatedAt = session.updatedAt;
-      if (!transfer.storageMode) {
-        transfer.storageMode = "chunked";
-      }
-      await saveDb(db);
-    }
-  }
+  await persistChunkProgress(session, req.auth!.userId);
   res.status(201).json({
     uploadId: session.id,
     chunkIndex,
@@ -2538,6 +2550,7 @@ const writeResponseBuffer = async (res: Response, buffer: Buffer) => {
 };
 
 const streamChunkedTransferDownload = async (
+  req: express.Request,
   res: Response,
   transfer: FileTransferRecord,
   action: "download" | "preview" = "download",
@@ -2546,17 +2559,31 @@ const streamChunkedTransferDownload = async (
     throw new Error("Chunked transfer metadata is incomplete.");
   }
 
-  res.status(200);
+  const chunkSize = transfer.uploadChunkSize || LARGE_UPLOAD_CHUNK_BYTES;
+  // Range support lets browsers start video/audio/image previews immediately
+  // and seek without downloading the whole file first.
+  const range = parseRangeHeader(req.headers.range, transfer.fileSize);
+  const start = range?.start ?? 0;
+  const end = range?.end ?? transfer.fileSize - 1;
+  const contentLength = end - start + 1;
+
+  res.status(range ? 206 : 200);
   res.setHeader("Content-Type", sanitizeMimeType(transfer.fileType));
   res.setHeader(
     "Content-Disposition",
     `${action === "preview" ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(transfer.fileName)}`,
   );
   res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Accept-Ranges", "bytes");
   res.setHeader("X-Transfer-Mode", "chunked");
-  res.setHeader("Content-Length", String(transfer.fileSize));
+  res.setHeader("Content-Length", String(contentLength));
+  if (range) {
+    res.setHeader("Content-Range", `bytes ${start}-${end}/${transfer.fileSize}`);
+  }
 
-  for (let chunkIndex = 0; chunkIndex < transfer.uploadTotalChunks; chunkIndex += 1) {
+  // Fetch only the chunks overlapped by the requested byte range.
+  const plan = planChunkedByteRange(start, end, chunkSize);
+  for (const { chunkIndex, sliceStart, sliceEnd } of plan) {
     const chunkPath = getChunkStoragePath(transfer.filePath, chunkIndex);
     const { data, error } = await supabase.storage.from(FILE_BUCKET).download(chunkPath);
     if (error || !data) {
@@ -2564,7 +2591,7 @@ const streamChunkedTransferDownload = async (
     }
 
     const chunkBuffer = Buffer.from(await data.arrayBuffer());
-    await writeResponseBuffer(res, chunkBuffer);
+    await writeResponseBuffer(res, chunkBuffer.subarray(sliceStart, sliceEnd + 1));
   }
 
   res.end();
@@ -2634,7 +2661,7 @@ app.get("/api/file-transfers/:id/download", fileListLimiter, requireAuth, async 
 
   if (transfer.storageMode === "chunked") {
     try {
-      await streamChunkedTransferDownload(res, transfer, action);
+      await streamChunkedTransferDownload(req, res, transfer, action);
     } catch (error) {
       console.error("Chunked transfer download error:", error);
       if (!res.headersSent) {

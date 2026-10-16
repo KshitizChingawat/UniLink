@@ -60,3 +60,56 @@ export const isZipBombCandidate = (mimeType, compressedBytes, expandedBytesEstim
         return false;
     return expandedBytesEstimate > compressedBytes * 100;
 };
+// Parse an HTTP `Range: bytes=start-end` header against a known file size.
+// Returns the inclusive { start, end } byte range, or null when the header is
+// missing/malformed/unsatisfiable (caller should then serve the full body).
+export const parseRangeHeader = (rangeHeader, fileSize) => {
+    const raw = Array.isArray(rangeHeader) ? rangeHeader[0] : rangeHeader;
+    if (!raw || typeof raw !== "string")
+        return null;
+    const match = raw.trim().match(/^bytes=(\d*)-(\d*)$/);
+    if (!match)
+        return null;
+    const [, startText, endText] = match;
+    if (!startText && !endText)
+        return null;
+    let start;
+    let end;
+    if (!startText) {
+        // Suffix range: last N bytes.
+        const suffixLength = Number.parseInt(endText, 10);
+        if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0)
+            return null;
+        if (suffixLength >= fileSize)
+            return { start: 0, end: fileSize - 1 };
+        start = fileSize - suffixLength;
+        end = fileSize - 1;
+    }
+    else {
+        start = Number.parseInt(startText, 10);
+        if (!Number.isSafeInteger(start) || start < 0 || start >= fileSize)
+            return null;
+        end = endText ? Number.parseInt(endText, 10) : fileSize - 1;
+        if (!Number.isSafeInteger(end) || end < start)
+            return null;
+        end = Math.min(end, fileSize - 1);
+    }
+    return { start, end };
+};
+// Map an inclusive byte range onto fixed-size chunk indices, slicing each
+// overlapping chunk to the exact bytes needed. Lets downloads/previews fetch
+// only the chunks a media player actually requests (instant seek/preview).
+export const planChunkedByteRange = (start, end, chunkSize) => {
+    const plan = [];
+    const firstChunk = Math.floor(start / chunkSize);
+    const lastChunk = Math.floor(end / chunkSize);
+    for (let chunkIndex = firstChunk; chunkIndex <= lastChunk; chunkIndex += 1) {
+        const chunkStart = chunkIndex * chunkSize;
+        plan.push({
+            chunkIndex,
+            sliceStart: Math.max(0, start - chunkStart),
+            sliceEnd: Math.min(chunkSize - 1, end - chunkStart),
+        });
+    }
+    return plan;
+};
