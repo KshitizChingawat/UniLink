@@ -68,10 +68,15 @@ app.use(cors({
             callback(null, true);
             return;
         }
-        if (isProduction && isTrustedProductionOrigin(origin)) {
+        // The frontend static site (e.g. unilink-frontend-omky.onrender.com) calls
+        // this API cross-origin. Deliberately NOT gated on NODE_ENV: if the
+        // service ever runs without NODE_ENV=production, the app must still work
+        // instead of failing every request with an opaque browser CORS block.
+        if (isTrustedProductionOrigin(origin)) {
             callback(null, true);
             return;
         }
+        logger.warn({ origin }, "CORS rejected disallowed origin");
         callback(new Error("Origin not allowed by CORS"));
     },
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],

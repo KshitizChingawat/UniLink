@@ -17,6 +17,9 @@ services:
         value: 7d
       - key: VAULT_SECRET
         sync: false
+      # Must include the frontend origin(s), comma-separated, e.g.
+      # https://unilink-frontend-omky.onrender.com (the API also auto-allows
+      # *.onrender.com hosts containing "unilink", this is defence in depth).
       - key: ALLOWED_ORIGINS
         sync: false
       - key: APP_BASE_URL
