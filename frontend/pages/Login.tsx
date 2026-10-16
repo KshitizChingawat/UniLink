@@ -49,6 +49,8 @@ const Login = () => {
   const [resettingPassword, setResettingPassword] = useState(false);
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmNewPassword, setShowConfirmNewPassword] = useState(false);
   const { signIn, signInWithGoogle, requestPasswordReset, resetPassword } = useAuth();
   const normalizedEmail = email.trim().toLowerCase();
   const emailLooksValid =
@@ -114,6 +116,8 @@ const Login = () => {
     setResetDeliveryMode(null);
     setNewPassword('');
     setConfirmNewPassword('');
+    setShowNewPassword(false);
+    setShowConfirmNewPassword(false);
     setForgotOpen(true);
   };
 
@@ -129,6 +133,8 @@ const Login = () => {
     if (result.error) {
       return;
     }
+    // A resend issues a FRESH code, so drop any previously typed one.
+    setResetOtp('');
     setResetDevelopmentOtp(result.developmentOtp || '');
     setResetDeliveryMode(result.deliveryMode || 'email');
     setForgotStep('reset');
@@ -367,6 +373,9 @@ const Login = () => {
           ) : (
             <>
               <div className="space-y-3">
+                <p className="text-sm text-slate-600 dark:text-slate-300">
+                  Resetting password for <span className="font-semibold">{forgotEmail}</span>
+                </p>
                 {resetDeliveryMode === 'fallback' && resetDevelopmentOtp && (
                   <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
                     <p className="font-medium">Temporary reset code</p>
@@ -378,35 +387,73 @@ const Login = () => {
                 )}
                 <div className="space-y-2">
                   <Label htmlFor="reset-otp">6-digit reset code</Label>
-                  <Input
-                    id="reset-otp"
-                    type="text"
-                    inputMode="numeric"
-                    maxLength={6}
-                    value={resetOtp}
-                    onChange={(e) => setResetOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                    placeholder="Enter 6-digit code"
-                  />
+                  <div className="flex gap-2">
+                    <Input
+                      id="reset-otp"
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={6}
+                      value={resetOtp}
+                      onChange={(e) => setResetOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                      placeholder="Enter 6-digit code"
+                      className="flex-1"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={handleForgotPassword}
+                      disabled={forgotLoading}
+                    >
+                      {forgotLoading ? 'Sending...' : 'Resend'}
+                    </Button>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    {resetDeliveryMode === 'email'
+                      ? 'Check your inbox (and spam folder) for the code.'
+                      : 'Each resend generates a fresh code and invalidates the previous one.'}
+                  </p>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="reset-new-password">New password</Label>
-                  <Input
-                    id="reset-new-password"
-                    type="password"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="Min 8 chars + special symbol"
-                  />
+                  <div className="relative">
+                    <Input
+                      id="reset-new-password"
+                      type={showNewPassword ? 'text' : 'password'}
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      placeholder="Min 8 chars + special symbol"
+                      className="pr-10"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowNewPassword(!showNewPassword)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                      aria-label={showNewPassword ? 'Hide password' : 'Review password'}
+                    >
+                      {showNewPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </button>
+                  </div>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="reset-confirm-password">Confirm new password</Label>
-                  <Input
-                    id="reset-confirm-password"
-                    type="password"
-                    value={confirmNewPassword}
-                    onChange={(e) => setConfirmNewPassword(e.target.value)}
-                    placeholder="Repeat new password"
-                  />
+                  <div className="relative">
+                    <Input
+                      id="reset-confirm-password"
+                      type={showConfirmNewPassword ? 'text' : 'password'}
+                      value={confirmNewPassword}
+                      onChange={(e) => setConfirmNewPassword(e.target.value)}
+                      placeholder="Repeat new password"
+                      className="pr-10"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowConfirmNewPassword(!showConfirmNewPassword)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                      aria-label={showConfirmNewPassword ? 'Hide password' : 'Review password'}
+                    >
+                      {showConfirmNewPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </button>
+                  </div>
                 </div>
               </div>
               <DialogFooter>

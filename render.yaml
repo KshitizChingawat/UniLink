@@ -29,3 +29,16 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      # Email delivery (required for OTP/reset codes to ARRIVE by email).
+      # Without these, the API shows a temporary on-screen code instead.
+      # Set them in the Render dashboard (e.g. Gmail App Password or Mailtrap).
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false

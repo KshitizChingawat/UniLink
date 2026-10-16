@@ -787,6 +787,14 @@ app.get("/api/health", async (_req, res) => {
         res.status(503).json({ status: "error", uptime: process.uptime(), db: "error" });
     }
 });
+// Public capability flags (booleans only, no secrets) so the frontend and
+// operators can tell why codes arrive by email vs. on-screen fallback.
+app.get("/api/auth/email-status", (_req, res) => {
+    res.json({
+        emailConfigured: isEmailVerificationConfigured(),
+        otpFallbackEnabled: OTP_FALLBACK_ENABLED,
+    });
+});
 app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) => {
     const parsed = registrationOtpRequestSchema.safeParse(req.body);
     if (!parsed.success) {
