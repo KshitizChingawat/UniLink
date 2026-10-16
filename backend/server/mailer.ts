@@ -137,16 +137,19 @@ export const sendPasswordResetOtp = async (email: string, otp: string): Promise<
     throw new Error("Email verification is not configured on the server.");
   }
 
-  const subject = "Reset your UniLink password";
-  const text = `Your UniLink password reset code is ${otp}. It expires in 10 minutes. If you did not request this, ignore this email.`;
+  // Spam-parity with the registration mail: identical subject shape and code
+  // line so filters treat both flows the same; the reset context is kept in
+  // the trailing sentence, never in the subject.
+  const subject = "Your UniLink verification code";
+  const text = `Your UniLink verification code is ${otp}. It expires in 10 minutes. If you did not request a password reset, ignore this email.`;
   const html = `
     <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #111827;">
-      <h2 style="margin-bottom: 8px;">Reset your UniLink password</h2>
-      <p>Use this one-time code to set a new password:</p>
+      <h2 style="margin-bottom: 8px;">Verify it's you</h2>
+      <p>Use this one-time code to finish resetting your password:</p>
       <div style="display: inline-block; padding: 12px 18px; border-radius: 12px; background: #2563eb; color: white; font-size: 24px; font-weight: 700; letter-spacing: 6px;">
         ${otp}
       </div>
-      <p style="margin-top: 16px;">This code expires in 10 minutes. If you did not request this, ignore this email.</p>
+      <p style="margin-top: 16px;">This code expires in 10 minutes. If you did not request a password reset, ignore this email.</p>
     </div>
   `;
 
