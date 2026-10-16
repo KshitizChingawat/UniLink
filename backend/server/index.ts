@@ -10,7 +10,7 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { z } from "zod";
 import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
-import { isEmailVerificationConfigured, isMailtrapDemoRestrictionError, sendRegistrationOtp } from "./mailer.js";
+import { isEmailVerificationConfigured, isMailtrapDemoRestrictionError, sendPasswordResetOtp, sendRegistrationOtp } from "./mailer.js";
 import { clearAuthCookies, comparePassword, createCsrfToken, hashPassword, requireAuth, requireCsrf, revokeToken, sanitizeUser, setAuthCookies, signAuthToken, signScopedToken, type AuthenticatedRequest } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
 import { containsNullBytes, ensureRelativeStoragePath, escapeHtml, isZipBombCandidate, nowIso, parseRangeHeader, planChunkedByteRange, sanitizeFilename, sanitizeMimeType, sanitizeTextInput } from "./helpers.js";
@@ -261,6 +261,22 @@ const registrationOtpVerifySchema = z.object({
   otp: z.string().trim().length(6),
 });
 
+const passwordResetRequestSchema = z.object({
+  email: z.string().trim().email().max(120),
+});
+
+const passwordResetSchema = z
+  .object({
+    email: z.string().trim().email().max(120),
+    otp: z.string().trim().length(6),
+    newPassword: z.string().min(8).max(128),
+    confirmPassword: z.string().min(8).max(128),
+  })
+  .refine((value) => value.newPassword === value.confirmPassword, {
+    message: "New passwords do not match",
+    path: ["confirmPassword"],
+  });
+
 const pairClaimSchema = z.object({
   deviceName: z.string().trim().min(1).max(120),
   deviceType: z.enum(["desktop", "mobile", "tablet", "browser"]),
@@ -447,9 +463,10 @@ const isValidMobileNumber = (mobileNumber: string) =>
 const getLatestEmailVerification = (
   db: Awaited<ReturnType<typeof loadDb>>,
   email: string,
+  purpose: EmailVerificationRecord["purpose"] = "register",
 ) =>
   db.emailVerifications
-    .filter((entry) => entry.email === email && entry.purpose === "register")
+    .filter((entry) => entry.email === email && entry.purpose === purpose)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] || null;
 
 const isEmailVerificationValid = (verification: EmailVerificationRecord | null) =>
@@ -1270,8 +1287,8 @@ app.post("/api/auth/google", tokenLimiter, async (req, res) => {
   }
 });
 
-app.post("/api/auth/forgot-password", authLimiter, async (req, res) => {
-  const parsed = forgotPasswordSchema.safeParse(req.body);
+app.post("/api/auth/forgot-password", tokenLimiter, async (req, res) => {
+  const parsed = passwordResetRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Enter a valid email address" });
     return;
@@ -1284,19 +1301,137 @@ app.post("/api/auth/forgot-password", authLimiter, async (req, res) => {
     return;
   }
 
+  // Same response shape whether or not the account exists (anti-enumeration).
+  const genericResponse = {
+    success: true,
+    message: "If an account exists for this email, a password reset code has been sent.",
+  };
+
   try {
     const db = await loadDb();
+    consumeExpiredEmailVerifications(db);
     const user = db.users.find((entry) => normalizeEmail(entry.email) === email);
+    if (!user) {
+      res.json(genericResponse);
+      return;
+    }
 
-    res.json({
-      success: true,
-      message: user
-        ? "Password reset support has been initiated for this account."
-        : "If an account exists for this email, password reset support has been initiated.",
-    });
+    // Fresh unique OTP per request; any previous reset code is invalidated.
+    const otp = createOtp();
+    const timestamp = nowIso();
+    const verification: EmailVerificationRecord = {
+      id: createId(),
+      email,
+      purpose: "password_reset",
+      otpHash: await hashPassword(otp),
+      createdAt: timestamp,
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    };
+
+    db.emailVerifications = db.emailVerifications.filter(
+      (entry) => !(entry.email === email && entry.purpose === "password_reset"),
+    );
+    db.emailVerifications.unshift(verification);
+    await saveDb(db);
+
+    if (!isEmailVerificationConfigured()) {
+      if (OTP_FALLBACK_ENABLED) {
+        logger.info({ email }, "Password reset email not configured — returning one-time fallback code");
+        res.json(
+          registrationOtpFallbackResponse(
+            "Email delivery is not configured right now. Use the temporary code shown below to reset your password.",
+            otp,
+          ),
+        );
+        return;
+      }
+      res.json(genericResponse);
+      return;
+    }
+
+    try {
+      await sendPasswordResetOtp(email, otp);
+      res.json({
+        success: true,
+        message: "If an account exists for this email, a password reset code has been sent.",
+        deliveryMode: "email" as const,
+      });
+      return;
+    } catch (mailError) {
+      if (OTP_FALLBACK_ENABLED) {
+        logger.warn({ email, error: mailError instanceof Error ? mailError.message : String(mailError) }, "Password reset email failed — returning one-time fallback code");
+        res.json(
+          registrationOtpFallbackResponse(
+            "Email delivery is temporarily unavailable. Use the temporary code shown below to reset your password.",
+            otp,
+          ),
+        );
+        return;
+      }
+      throw mailError;
+    }
   } catch (error) {
-    console.error("Forgot password lookup error:", error);
-    res.status(500).json({ error: "Unable to start password reset support right now." });
+    console.error("Forgot password error:", error);
+    res.status(500).json({ error: "Unable to start password reset right now." });
+  }
+});
+
+app.post("/api/auth/reset-password", authLimiter, async (req, res) => {
+  const parsed = passwordResetSchema.safeParse(req.body);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    res.status(400).json({ error: issue?.message || "Invalid password reset request." });
+    return;
+  }
+
+  const email = normalizeEmail(parsed.data.email);
+  const emailError = assertValidEmailAddress(email);
+  if (emailError) {
+    res.status(400).json({ error: emailError });
+    return;
+  }
+
+  if (!isStrongPassword(parsed.data.newPassword)) {
+    res.status(400).json({
+      error: "Password must be at least 8 characters and include a special symbol.",
+    });
+    return;
+  }
+
+  try {
+    const db = await loadDb();
+    consumeExpiredEmailVerifications(db);
+    const user = db.users.find((entry) => normalizeEmail(entry.email) === email);
+    const verification = getLatestEmailVerification(db, email, "password_reset");
+
+    if (!user || !verification || new Date(verification.expiresAt).getTime() <= Date.now()) {
+      res.status(400).json({ error: "Reset code expired. Request a new code." });
+      return;
+    }
+
+    const otpMatches = await comparePassword(parsed.data.otp, verification.otpHash);
+    if (!otpMatches) {
+      res.status(400).json({ error: "Invalid reset code." });
+      return;
+    }
+
+    if (await comparePassword(parsed.data.newPassword, user.passwordHash)) {
+      res.status(400).json({ error: "Choose a new password different from the current one." });
+      return;
+    }
+
+    user.passwordHash = await hashPassword(parsed.data.newPassword);
+    user.updatedAt = nowIso();
+    // Single-use code: drop all reset verifications for this email.
+    db.emailVerifications = db.emailVerifications.filter(
+      (entry) => !(entry.email === email && entry.purpose === "password_reset"),
+    );
+    await saveDb(db);
+
+    res.json({ success: true, message: "Password reset successfully. Sign in with your new password." });
+  } catch (error) {
+    console.error("Reset password error:", error);
+    res.status(500).json({ error: "Unable to reset password right now." });
   }
 });
 

@@ -95,6 +95,61 @@ export const sendRegistrationOtp = async (email, otp) => {
         new Promise((_, reject) => setTimeout(() => reject(new Error("Email delivery timed out. Check SMTP settings and sender domain.")), 20000)),
     ]);
 };
+export const sendPasswordResetOtp = async (email, otp) => {
+    if (!SMTP_FROM) {
+        throw new Error("Email verification is not configured on the server.");
+    }
+    const subject = "Reset your UniLink password";
+    const text = `Your UniLink password reset code is ${otp}. It expires in 10 minutes. If you did not request this, ignore this email.`;
+    const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #111827;">
+      <h2 style="margin-bottom: 8px;">Reset your UniLink password</h2>
+      <p>Use this one-time code to set a new password:</p>
+      <div style="display: inline-block; padding: 12px 18px; border-radius: 12px; background: #2563eb; color: white; font-size: 24px; font-weight: 700; letter-spacing: 6px;">
+        ${otp}
+      </div>
+      <p style="margin-top: 16px;">This code expires in 10 minutes. If you did not request this, ignore this email.</p>
+    </div>
+  `;
+    if (shouldUseMailtrapApi) {
+        const match = SMTP_FROM.match(/<([^>]+)>/);
+        const fromEmail = (match?.[1] || SMTP_FROM).trim();
+        const fromName = match ? SMTP_FROM.replace(match[0], "").trim() || "UniLink" : "UniLink";
+        const response = await Promise.race([
+            fetch(MAILTRAP_SEND_API, {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${SMTP_PASS}`,
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    from: { email: fromEmail, name: fromName },
+                    to: [{ email }],
+                    subject,
+                    text,
+                    html,
+                    category: "unilink_password_reset_otp",
+                }),
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("Mailtrap API timed out. Check your Mailtrap token and sending domain.")), 15000)),
+        ]);
+        if (!(response instanceof Response)) {
+            throw new Error("Mailtrap API request failed.");
+        }
+        if (!response.ok) {
+            const payload = await response.text();
+            throw new Error(`Mailtrap API rejected the password reset email: ${payload || response.statusText}`);
+        }
+        return;
+    }
+    if (!transporter) {
+        throw new Error("Email verification is not configured on the server.");
+    }
+    await Promise.race([
+        transporter.sendMail({ from: SMTP_FROM, to: email, subject, text, html }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Email delivery timed out. Check SMTP settings and sender domain.")), 20000)),
+    ]);
+};
 export const isMailtrapDemoRestrictionError = (error) => {
     const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
     return (message.includes("Demo domains can only be used to send emails to account owners") ||

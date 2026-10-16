@@ -124,7 +124,7 @@ export interface PairSessionRecord {
 export interface EmailVerificationRecord {
   id: string;
   email: string;
-  purpose: "register";
+  purpose: "register" | "password_reset";
   otpHash: string;
   expiresAt: string;
   createdAt: string;

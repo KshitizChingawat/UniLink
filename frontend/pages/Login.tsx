@@ -12,7 +12,6 @@ import AnimatedToggle from '@/components/ui/animated-toggle';
 import GenerativeArtSceneV3 from '@/components/ui/quantum-nebula';
 import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { apiFetch } from '@/lib/api';
 
 const blockedEmailDomains = new Set([
   'example.com',
@@ -41,9 +40,16 @@ const Login = () => {
   const [rememberMe, setRememberMe] = useState(false);
   const [loading, setLoading] = useState(false);
   const [forgotOpen, setForgotOpen] = useState(false);
+  const [forgotStep, setForgotStep] = useState<'email' | 'reset'>('email');
   const [forgotEmail, setForgotEmail] = useState('');
   const [forgotLoading, setForgotLoading] = useState(false);
-  const { signIn, signInWithGoogle } = useAuth();
+  const [resetOtp, setResetOtp] = useState('');
+  const [resetDevelopmentOtp, setResetDevelopmentOtp] = useState('');
+  const [resetDeliveryMode, setResetDeliveryMode] = useState<'email' | 'fallback' | null>(null);
+  const [resettingPassword, setResettingPassword] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const { signIn, signInWithGoogle, requestPasswordReset, resetPassword } = useAuth();
   const normalizedEmail = email.trim().toLowerCase();
   const emailLooksValid =
     !email || (
@@ -100,6 +106,17 @@ const Login = () => {
     setLoading(false);
   };
 
+  const openForgotDialog = () => {
+    setForgotEmail(email);
+    setForgotStep('email');
+    setResetOtp('');
+    setResetDevelopmentOtp('');
+    setResetDeliveryMode(null);
+    setNewPassword('');
+    setConfirmNewPassword('');
+    setForgotOpen(true);
+  };
+
   const handleForgotPassword = async () => {
     if (!forgotEmail.trim()) {
       toast.error('Enter your email address first.');
@@ -107,17 +124,39 @@ const Login = () => {
     }
 
     setForgotLoading(true);
-    try {
-      const data = await apiFetch<{ message: string }>('/api/auth/forgot-password', {
-        method: 'POST',
-        body: JSON.stringify({ email: forgotEmail }),
-      });
-      toast.success(data.message);
+    const result = await requestPasswordReset(forgotEmail);
+    setForgotLoading(false);
+    if (result.error) {
+      return;
+    }
+    setResetDevelopmentOtp(result.developmentOtp || '');
+    setResetDeliveryMode(result.deliveryMode || 'email');
+    setForgotStep('reset');
+  };
+
+  const handleResetPassword = async () => {
+    if (resetOtp.trim().length !== 6) {
+      toast.error('Enter the 6-digit reset code.');
+      return;
+    }
+    if (newPassword.length < 8 || !/[^A-Za-z0-9]/.test(newPassword)) {
+      toast.error('Password must be at least 8 characters and include a special symbol.');
+      return;
+    }
+    if (newPassword !== confirmNewPassword) {
+      toast.error('Passwords do not match');
+      return;
+    }
+
+    setResettingPassword(true);
+    const result = await resetPassword(forgotEmail, resetOtp.trim(), newPassword, confirmNewPassword);
+    setResettingPassword(false);
+    if (!result.error) {
       setForgotOpen(false);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to start password reset support.');
-    } finally {
-      setForgotLoading(false);
+      setForgotStep('email');
+      setResetOtp('');
+      setNewPassword('');
+      setConfirmNewPassword('');
     }
   };
 
@@ -232,10 +271,7 @@ const Login = () => {
               </div>
               <button
                 type="button"
-                onClick={() => {
-                  setForgotEmail(email);
-                  setForgotOpen(true);
-                }}
+                onClick={openForgotDialog}
                 className="text-sm font-medium text-sky-400 transition-colors hover:text-sky-300"
               >
                 Forgot password?
@@ -299,30 +335,90 @@ const Login = () => {
       <Dialog open={forgotOpen} onOpenChange={setForgotOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Reset password support</DialogTitle>
+            <DialogTitle>Reset your password</DialogTitle>
             <DialogDescription>
-              Enter your account email and we&apos;ll start the password reset support flow for UniLink.
+              {forgotStep === 'email'
+                ? 'Enter your account email and we will send you a 6-digit reset code.'
+                : 'Enter the reset code and choose a new password.'}
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-2">
-            <Label htmlFor="forgot-email">Email address</Label>
-            <Input
-              id="forgot-email"
-              type="email"
-              value={forgotEmail}
-              onChange={(e) => setForgotEmail(e.target.value)}
-              placeholder="Enter your email"
-              className="mt-1"
-            />
-          </div>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setForgotOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="button" onClick={handleForgotPassword} disabled={forgotLoading}>
-              {forgotLoading ? 'Sending...' : 'Continue'}
-            </Button>
-          </DialogFooter>
+          {forgotStep === 'email' ? (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="forgot-email">Email address</Label>
+                <Input
+                  id="forgot-email"
+                  type="email"
+                  value={forgotEmail}
+                  onChange={(e) => setForgotEmail(e.target.value)}
+                  placeholder="Enter your email"
+                  className="mt-1"
+                />
+              </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={() => setForgotOpen(false)}>
+                  Cancel
+                </Button>
+                <Button type="button" onClick={handleForgotPassword} disabled={forgotLoading}>
+                  {forgotLoading ? 'Sending...' : 'Send reset code'}
+                </Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <>
+              <div className="space-y-3">
+                {resetDeliveryMode === 'fallback' && resetDevelopmentOtp && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                    <p className="font-medium">Temporary reset code</p>
+                    <p className="mt-1">Email delivery is unavailable right now. Use this code:</p>
+                    <div className="mt-2 rounded-md bg-white px-3 py-2 text-base font-bold tracking-[0.35em] text-amber-700">
+                      {resetDevelopmentOtp}
+                    </div>
+                  </div>
+                )}
+                <div className="space-y-2">
+                  <Label htmlFor="reset-otp">6-digit reset code</Label>
+                  <Input
+                    id="reset-otp"
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={resetOtp}
+                    onChange={(e) => setResetOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="Enter 6-digit code"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="reset-new-password">New password</Label>
+                  <Input
+                    id="reset-new-password"
+                    type="password"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Min 8 chars + special symbol"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="reset-confirm-password">Confirm new password</Label>
+                  <Input
+                    id="reset-confirm-password"
+                    type="password"
+                    value={confirmNewPassword}
+                    onChange={(e) => setConfirmNewPassword(e.target.value)}
+                    placeholder="Repeat new password"
+                  />
+                </div>
+              </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={() => setForgotStep('email')}>
+                  Back
+                </Button>
+                <Button type="button" onClick={handleResetPassword} disabled={resettingPassword}>
+                  {resettingPassword ? 'Resetting...' : 'Reset password'}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
         </DialogContent>
       </Dialog>
     </div>

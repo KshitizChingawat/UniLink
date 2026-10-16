@@ -121,12 +121,22 @@ export const resolveApiBaseUrl = async () => {
         }
       }
 
-      resolvedApiBaseUrl = candidates[0] || "";
-      return resolvedApiBaseUrl;
+      // No candidate answered: return a best-effort base WITHOUT caching it,
+      // so the next call re-pings (the backend may just be waking up or
+      // redeploying) instead of sticking to a dead base forever.
+      resolvedApiBaseUrlPromise = null;
+      return candidates[0] || "";
     })();
   }
 
   return resolvedApiBaseUrlPromise;
+};
+
+// Drop a cached API base so the next request re-resolves it (e.g. the backend
+// restarted on a new host, or the first resolution happened while it slept).
+export const resetApiBaseUrlCache = () => {
+  resolvedApiBaseUrl = null;
+  resolvedApiBaseUrlPromise = null;
 };
 
 export const apiFetch = async <T>(input: string, init: RequestInit = {}): Promise<T> => {
@@ -150,11 +160,26 @@ export const apiFetch = async <T>(input: string, init: RequestInit = {}): Promis
     }
   }
 
-  const response = await fetch(`${apiBaseUrl}${input}`, {
-    ...init,
-    headers,
-    credentials: "include",
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${apiBaseUrl}${input}`, {
+      ...init,
+      headers,
+      credentials: "include",
+    });
+  } catch (error) {
+    // Network-level failure (server down/sleeping, CORS block, DNS, offline).
+    // The backend may just be waking up — forget the cached base so the next
+    // attempt re-resolves it instead of hammering a dead host.
+    resetApiBaseUrlCache();
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw error;
+    }
+    throw new ApiError(
+      "Cannot reach the UniLink server. Check your connection and try again in a moment.",
+      0,
+    );
+  }
 
   const isJson = response.headers.get("content-type")?.includes("application/json");
   const payload = isJson ? await response.json() : await response.text();
