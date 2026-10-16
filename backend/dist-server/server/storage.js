@@ -1,7 +1,24 @@
 import { randomUUID } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { supabase, DB_BUCKET } from "./supabase.js";
 import { logger } from "./logger.js";
 const DB_OBJECT_PATH = "db.json";
+// Local disk journal: same JSON database, mirrored on every save. Survives
+// process restarts/sleeps on the host (unlike memory) so accounts keep working
+// through Supabase outages — at the cost of being host-local (see README caveat
+// in saveDb). Directory is gitignored (backend/server/data).
+const LOCAL_DB_PATHS = (() => {
+    const moduleDir = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/i, "$1"));
+    return [
+        // Production dist layout: backend/dist-server/server -> backend/server/data
+        path.resolve(moduleDir, "..", "..", "server", "data", "db.json"),
+        // Dev src layout: backend/server -> backend/server/data
+        path.resolve(moduleDir, "data", "db.json"),
+    ];
+})();
+let persistenceMode = "memory";
+export const getPersistenceMode = () => persistenceMode;
 const initialDb = {
     users: [],
     devices: [],
@@ -74,7 +91,9 @@ const normalizeDb = (raw) => ({
     pairSessions: raw?.pairSessions || [],
     emailVerifications: raw?.emailVerifications || [],
 });
-export const ensureDataDirs = async () => { };
+export const ensureDataDirs = async () => {
+    await mkdir(path.dirname(LOCAL_DB_PATHS[0]), { recursive: true });
+};
 export const createId = () => randomUUID();
 export const resetMemoryCache = () => {
     memoryCache = null;
@@ -97,6 +116,55 @@ const writeDb = async (json) => {
         .upload(DB_OBJECT_PATH, buffer, { contentType: "application/json", upsert: true });
     if (error)
         throw new Error(`Failed to save database: ${error.message}`);
+};
+const readLocalDb = async () => {
+    for (const filePath of LOCAL_DB_PATHS) {
+        try {
+            const raw = await readFile(filePath, "utf8");
+            return normalizeDb(JSON.parse(raw));
+        }
+        catch {
+            // Missing/unreadable/corrupt — try the next candidate path.
+        }
+    }
+    return null;
+};
+const writeLocalDb = async (db) => {
+    try {
+        await mkdir(path.dirname(LOCAL_DB_PATHS[0]), { recursive: true });
+        await writeFile(LOCAL_DB_PATHS[0], JSON.stringify(normalizeDb(db), null, 2), "utf8");
+        return true;
+    }
+    catch (error) {
+        logger.error({ error: error instanceof Error ? error.message : String(error) }, "Failed to persist database to local disk journal");
+        return false;
+    }
+};
+// Absorb records from `source` that `target` is missing (concurrent-writer or
+// offline-created data). Users: always safe (never deleted). Verifications:
+// only live, non-superseded, non-consumed ones — expired/consumed codes must
+// never come back.
+const absorbMissingUsersAndOtps = (target, source, now) => {
+    const knownIds = new Set(target.users.map((user) => user.id));
+    const knownEmails = new Set(target.users.map((user) => user.email.toLowerCase()));
+    for (const user of source.users) {
+        if (!knownIds.has(user.id) && !knownEmails.has(user.email.toLowerCase())) {
+            target.users.push(normalizeUser(user));
+        }
+    }
+    const callerPurposes = new Set(target.emailVerifications.map((entry) => `${entry.email}::${entry.purpose}`));
+    const knownVerificationIds = new Set(target.emailVerifications.map((entry) => entry.id));
+    for (const entry of source.emailVerifications) {
+        if (knownVerificationIds.has(entry.id))
+            continue;
+        if (callerPurposes.has(`${entry.email}::${entry.purpose}`))
+            continue;
+        if (consumedVerificationIds.has(entry.id))
+            continue;
+        if (new Date(entry.expiresAt).getTime() <= now)
+            continue;
+        target.emailVerifications.push(entry);
+    }
 };
 const sortByCreatedAt = (records) => [...records].sort((left, right) => {
     const leftTime = left.createdAt ? Date.parse(left.createdAt) : 0;
@@ -144,12 +212,59 @@ export const loadDb = async () => {
             // would wipe in-process OTPs and fresh signups with an empty database.
             return memoryCache;
         }
+        if (!raw) {
+            // Remote unreadable and no memory state (e.g. fresh boot during an
+            // outage): fall back to the local disk journal before giving up.
+            const disk = await readLocalDb();
+            if (disk) {
+                persistenceMode = "local";
+                memoryCache = disk;
+                return disk;
+            }
+        }
         const db = normalizeDb(raw ? JSON.parse(raw) : null);
+        // Reconnect reconcile: remote is readable again but may predate accounts
+        // created offline — merge disk users UP so restoring Supabase never
+        // hides accounts a second time. (Verifications intentionally excluded:
+        // they are 10-minute ephemeral; a stale one must never come back.)
+        const disk = await readLocalDb();
+        if (disk) {
+            const before = db.users.length;
+            const knownIds = new Set(db.users.map((user) => user.id));
+            const knownEmails = new Set(db.users.map((user) => user.email.toLowerCase()));
+            for (const user of disk.users) {
+                if (!knownIds.has(user.id) && !knownEmails.has(user.email.toLowerCase())) {
+                    db.users.push(normalizeUser(user));
+                }
+            }
+            if (db.users.length !== before) {
+                logger.info({ reconciledUsers: db.users.length - before }, "Reconciled offline-created accounts into the remote database");
+                await saveDb(db);
+                persistenceMode = "remote";
+                memoryCache = db;
+                return memoryCache;
+            }
+        }
+        persistenceMode = raw ? "remote" : persistenceMode;
         memoryCache = db;
         return db;
     }
     catch {
         storageAvailable = false;
+        // Remote threw (network down, project paused): disk journal first, then
+        // the in-memory cache, so restarts during an outage keep working.
+        try {
+            const disk = await readLocalDb();
+            if (disk) {
+                persistenceMode = "local";
+                memoryCache = disk;
+                return disk;
+            }
+        }
+        catch {
+            // Fall through to memory below.
+        }
+        persistenceMode = "memory";
         // Fall back to in-memory cache, or create a fresh empty database
         const nextDb = memoryCache ?? { ...initialDb };
         memoryCache = nextDb;
@@ -167,68 +282,59 @@ export const saveDb = async (db) => {
     // Always keep in-memory cache in sync
     const normalized = normalizeDb(db);
     memoryCache = normalized;
-    // Resolves true only when this snapshot actually reached remote storage.
-    // Auth-identity writes (signup, password changes) must check this: a
-    // "success" that never persisted becomes a phantom account that vanishes on
-    // restart and then 401s at login. Returns false instead of throwing so
-    // retryable flows (chunk progress, clipboard sync) can degrade gracefully.
-    let persisted = false;
+    // Resolves "remote" when the snapshot reached Supabase, "local" when only
+    // the on-disk journal accepted it (survives restarts/sleeps on this host —
+    // enough for accounts to keep working through a Supabase outage), and false
+    // when NEITHER persisted. Auth-identity writes must treat false as failure:
+    // a "success" that reached nowhere becomes a phantom account that 401s.
+    // Returns a status (never throws) so retryable flows (chunk progress,
+    // clipboard sync) can degrade gracefully.
+    let outcome = false;
     // Chain writes so they never run in parallel
     writeLock = writeLock
         .catch(() => undefined)
         .then(async () => {
         // Merge inside the serialized section, against the LATEST persisted
-        // snapshot: re-attach users added by a concurrent request that read the
-        // database before this snapshot was taken. (Deletes of other record
-        // types still apply — only users are merged, and users are never
-        // deleted — so nothing resurrected here can surprise a delete flow.)
+        // snapshot: re-attach users/codes added by a concurrent request that
+        // read the database before this snapshot was taken. (Deletes of other
+        // record types still apply — only users/live-OTPs merge — so nothing
+        // resurrected here can surprise a delete flow.)
         const snapshot = {
             ...normalized,
             users: [...normalized.users],
             emailVerifications: [...normalized.emailVerifications],
         };
         if (lastPersistedDb) {
-            const knownIds = new Set(snapshot.users.map((user) => user.id));
-            const knownEmails = new Set(snapshot.users.map((user) => user.email.toLowerCase()));
-            for (const user of lastPersistedDb.users) {
-                if (!knownIds.has(user.id) && !knownEmails.has(user.email.toLowerCase())) {
-                    snapshot.users.push(user);
-                }
-            }
-            // Same race protection for OTP codes: re-attach verifications created
-            // concurrently — but NEVER ones the caller deliberately replaced
-            // (superseded: same email+purpose present), consumed (single-use), or
-            // expired. Otherwise a concurrent signup/reset could wipe a live code.
             const now = Date.now();
             for (const [id, at] of consumedVerificationIds) {
                 if (now - at > CONSUMED_ID_RETENTION_MS)
                     consumedVerificationIds.delete(id);
             }
-            const callerPurposes = new Set(snapshot.emailVerifications.map((entry) => `${entry.email}::${entry.purpose}`));
-            const knownVerificationIds = new Set(snapshot.emailVerifications.map((entry) => entry.id));
-            for (const entry of lastPersistedDb.emailVerifications) {
-                if (knownVerificationIds.has(entry.id))
-                    continue;
-                if (callerPurposes.has(`${entry.email}::${entry.purpose}`))
-                    continue;
-                if (consumedVerificationIds.has(entry.id))
-                    continue;
-                if (new Date(entry.expiresAt).getTime() <= now)
-                    continue;
-                snapshot.emailVerifications.push(entry);
-            }
-            // The merged snapshot is the freshest known state — serve it from memory too.
+            absorbMissingUsersAndOtps(snapshot, lastPersistedDb, now);
+            // The merged snapshot is the freshest known state — serve it too.
             memoryCache = snapshot;
         }
         try {
             await writeDb(JSON.stringify(snapshot, null, 2));
             lastPersistedDb = snapshot;
-            persisted = true;
+            persistenceMode = "remote";
+            outcome = "remote";
         }
-        catch (error) {
-            logger.error({ error: error instanceof Error ? error.message : String(error) }, "Failed to persist database to Supabase Storage — recent changes are memory-only and will be lost on restart");
+        catch (remoteError) {
+            logger.warn({ error: remoteError instanceof Error ? remoteError.message : String(remoteError) }, "Remote database write failed — falling back to local disk journal");
+        }
+        // Disk journal mirrors every save, success or not, so a remote outage
+        // never loses data that is still on this host.
+        if (await writeLocalDb(snapshot)) {
+            if (outcome !== "remote") {
+                persistenceMode = "local";
+                outcome = "local";
+            }
+        }
+        else if (outcome !== "remote") {
+            logger.error("Database write failed BOTH remotely and locally — recent changes are memory-only and will be lost on restart");
         }
     });
     await writeLock;
-    return persisted;
+    return outcome;
 };

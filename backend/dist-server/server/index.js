@@ -14,7 +14,7 @@ import { getEmailProvider, isEmailVerificationConfigured, isMailtrapDemoRestrict
 import { clearAuthCookies, comparePassword, createCsrfToken, hashPassword, requireAuth, requireCsrf, revokeToken, sanitizeUser, setAuthCookies, signAuthToken } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
 import { ensureRelativeStoragePath, isZipBombCandidate, nowIso, parseRangeHeader, planChunkedByteRange, sanitizeFilename, sanitizeMimeType, sanitizeTextInput } from "./helpers.js";
-import { createId, ensureDataDirs, isStorageAvailable, loadDb, markVerificationsConsumed, saveDb, withDbLock } from "./storage.js";
+import { createId, ensureDataDirs, getPersistenceMode, isStorageAvailable, loadDb, markVerificationsConsumed, saveDb, withDbLock } from "./storage.js";
 import { appConfig } from "./config.js";
 import { createErrorHandler, rejectDisallowedOrigin } from "./http.js";
 import { httpLogger, logger } from "./logger.js";
@@ -785,8 +785,14 @@ const buildPairSession = (userId) => {
 const isPairSessionExpired = (session) => Boolean(session.usedAt) || new Date(session.expiresAt).getTime() <= Date.now();
 app.get("/api/health", async (_req, res) => {
     try {
-        await loadDb();
-        res.json({ status: "ok", uptime: process.uptime(), db: "connected" });
+        const db = await loadDb();
+        res.json({
+            status: "ok",
+            uptime: process.uptime(),
+            db: "connected",
+            users: db.users.length,
+            persistence: getPersistenceMode(),
+        });
     }
     catch {
         res.status(503).json({ status: "error", uptime: process.uptime(), db: "error" });
@@ -2777,7 +2783,7 @@ ensureDataDirs()
     // Boot-time persistence self-check: if the database cannot be read here,
     // signups would silently become memory-only phantom accounts.
     loadDb()
-        .then((db) => logger.info({ users: db.users.length, storageAvailable: isStorageAvailable() }, "Persistence check at startup"))
+        .then((db) => logger.info({ users: db.users.length, storageAvailable: isStorageAvailable(), persistence: getPersistenceMode() }, "Persistence check at startup"))
         .catch((error) => logger.error({ error: error instanceof Error ? error.message : String(error) }, "Persistence check at startup FAILED — accounts may not survive restarts"));
     server.requestTimeout = UPLOAD_REQUEST_TIMEOUT_MS;
     server.headersTimeout = UPLOAD_REQUEST_TIMEOUT_MS + 60_000;

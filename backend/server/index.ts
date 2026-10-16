@@ -14,7 +14,7 @@ import { getEmailProvider, isEmailVerificationConfigured, isMailtrapDemoRestrict
 import { clearAuthCookies, comparePassword, createCsrfToken, hashPassword, requireAuth, requireCsrf, revokeToken, sanitizeUser, setAuthCookies, signAuthToken, signScopedToken, type AuthenticatedRequest } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
 import { containsNullBytes, ensureRelativeStoragePath, escapeHtml, isZipBombCandidate, nowIso, parseRangeHeader, planChunkedByteRange, sanitizeFilename, sanitizeMimeType, sanitizeTextInput } from "./helpers.js";
-import { createId, ensureDataDirs, isStorageAvailable, loadDb, markVerificationsConsumed, saveDb, withDbLock } from "./storage.js";
+import { createId, ensureDataDirs, getPersistenceMode, isStorageAvailable, loadDb, markVerificationsConsumed, saveDb, withDbLock } from "./storage.js";
 import type { AiSuggestionRecord, BluetoothDeviceRecord, ClipboardRecord, DeviceRecord, EmailVerificationRecord, FileTransferRecord, PairSessionRecord, UserRecord, VaultRecord } from "./types.js";
 import { appConfig } from "./config.js";
 import { createErrorHandler, HttpError, rejectDisallowedOrigin } from "./http.js";
@@ -987,8 +987,14 @@ const isPairSessionExpired = (session: PairSessionRecord) =>
 
 app.get("/api/health", async (_req, res) => {
   try {
-    await loadDb();
-    res.json({ status: "ok", uptime: process.uptime(), db: "connected" });
+    const db = await loadDb();
+    res.json({
+      status: "ok",
+      uptime: process.uptime(),
+      db: "connected",
+      users: db.users.length,
+      persistence: getPersistenceMode(),
+    });
   } catch {
     res.status(503).json({ status: "error", uptime: process.uptime(), db: "error" });
   }
@@ -1025,7 +1031,7 @@ const stageEmailOtp = async (
   db: Awaited<ReturnType<typeof loadDb>>,
   email: string,
   purpose: EmailVerificationRecord["purpose"],
-): Promise<{ otp: string; persisted: boolean }> => {
+): Promise<{ otp: string; persisted: "remote" | "local" | false }> => {
   const otp = createOtp();
   const timestamp = nowIso();
   const verification: EmailVerificationRecord = {
@@ -3385,7 +3391,7 @@ ensureDataDirs()
     loadDb()
       .then((db) =>
         logger.info(
-          { users: db.users.length, storageAvailable: isStorageAvailable() },
+          { users: db.users.length, storageAvailable: isStorageAvailable(), persistence: getPersistenceMode() },
           "Persistence check at startup",
         ),
       )
