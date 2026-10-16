@@ -14,7 +14,7 @@ import { isEmailVerificationConfigured, isMailtrapDemoRestrictionError, sendPass
 import { clearAuthCookies, comparePassword, createCsrfToken, hashPassword, requireAuth, requireCsrf, revokeToken, sanitizeUser, setAuthCookies, signAuthToken } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
 import { ensureRelativeStoragePath, isZipBombCandidate, nowIso, parseRangeHeader, planChunkedByteRange, sanitizeFilename, sanitizeMimeType, sanitizeTextInput } from "./helpers.js";
-import { createId, ensureDataDirs, loadDb, saveDb } from "./storage.js";
+import { createId, ensureDataDirs, isStorageAvailable, loadDb, markVerificationsConsumed, saveDb, withDbLock } from "./storage.js";
 import { appConfig } from "./config.js";
 import { createErrorHandler, rejectDisallowedOrigin } from "./http.js";
 import { httpLogger, logger } from "./logger.js";
@@ -801,12 +801,14 @@ app.get("/api/auth/email-status", (_req, res) => {
     });
 });
 // THE single OTP issuance path for every email-code flow (registration,
-// password reset, ...). Each call mints a fresh unique code, invalidates older
-// codes for the same email+purpose, stores only a hash (10-minute expiry),
-// and follows the exact same delivery ladder: real email → testing/failure
-// fallback code → unconfigured signal. Callers only differ in pre-checks
-// (e.g. duplicate account, unknown account) and wording.
-const issueEmailOtp = async (db, email, purpose, sendMail, messages) => {
+// password reset, ...), split in two so the database span can run inside the
+// global DB lock while slow email delivery stays outside it:
+//   1. stageEmailOtp(db, ...) — mints a fresh unique code, invalidates older
+//      codes for the same email+purpose, stores only a hash (10-minute
+//      expiry). MUST run inside withDbLock.
+//   2. deliverEmailOtp(...) — the exact same delivery ladder for every flow:
+//      real email → testing/failure fallback code → unconfigured signal.
+const stageEmailOtp = async (db, email, purpose) => {
     const otp = createOtp();
     const timestamp = nowIso();
     const verification = {
@@ -819,7 +821,10 @@ const issueEmailOtp = async (db, email, purpose, sendMail, messages) => {
     };
     db.emailVerifications = db.emailVerifications.filter((entry) => !(entry.email === email && entry.purpose === purpose));
     db.emailVerifications.unshift(verification);
-    await saveDb(db);
+    const persisted = await saveDb(db);
+    return { otp, persisted };
+};
+const deliverEmailOtp = async (email, purpose, otp, sendMail, messages) => {
     if (!isEmailVerificationConfigured()) {
         if (OTP_FALLBACK_ENABLED) {
             logger.info({ email, purpose }, "OTP email not configured — returning one-time fallback code");
@@ -859,13 +864,26 @@ app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) =>
         return;
     }
     try {
-        const db = await loadDb();
-        consumeExpiredEmailVerifications(db);
-        if (db.users.some((user) => normalizeEmail(user.email) === email)) {
+        // Database span runs locked so a concurrent request can neither steal a
+        // duplicate-check nor wipe this fresh code; email delivery stays outside.
+        const staged = await withDbLock(async () => {
+            const db = await loadDb();
+            consumeExpiredEmailVerifications(db);
+            if (db.users.some((user) => normalizeEmail(user.email) === email)) {
+                return { duplicate: true };
+            }
+            const { otp, persisted } = await stageEmailOtp(db, email, "register");
+            return { otp, persisted };
+        });
+        if ("duplicate" in staged) {
             res.status(409).json({ error: "Email is already registered" });
             return;
         }
-        const result = await issueEmailOtp(db, email, "register", sendRegistrationOtp, {
+        if (!staged.persisted) {
+            res.status(503).json({ error: "Failed to save the verification code. Please try again." });
+            return;
+        }
+        const result = await deliverEmailOtp(email, "register", staged.otp, sendRegistrationOtp, {
             sent: "Verification code sent to your email.",
             unconfiguredFallback: "Email delivery is not configured right now. Use the temporary OTP shown below to continue signup.",
             testingFallback: "Email delivery is in testing mode. Use the temporary OTP shown below.",
@@ -898,20 +916,30 @@ app.post("/api/auth/verify-registration-otp", authLimiter, async (req, res) => {
         return;
     }
     try {
-        const db = await loadDb();
-        consumeExpiredEmailVerifications(db);
-        const verification = getLatestEmailVerification(db, email);
-        if (!verification || new Date(verification.expiresAt).getTime() <= Date.now()) {
-            res.status(400).json({ error: "Verification code expired. Request a new code." });
+        // Locked: the check, the verified flag, and its save must be atomic, or a
+        // concurrent write can drop the flag and signup then refuses this email.
+        const outcome = await withDbLock(async () => {
+            const db = await loadDb();
+            consumeExpiredEmailVerifications(db);
+            const verification = getLatestEmailVerification(db, email);
+            if (!verification || new Date(verification.expiresAt).getTime() <= Date.now()) {
+                return { error: "Verification code expired. Request a new code." };
+            }
+            const otpMatches = await comparePassword(parsed.data.otp, verification.otpHash);
+            if (!otpMatches) {
+                return { error: "Invalid verification code." };
+            }
+            verification.verifiedAt = nowIso();
+            if (!(await saveDb(db))) {
+                return { error: "Verification could not be saved. Request a new code and try again." };
+            }
+            return { verified: true };
+        });
+        if ("error" in outcome) {
+            const status = outcome.error === "Verification could not be saved. Request a new code and try again." ? 503 : 400;
+            res.status(status).json({ error: outcome.error });
             return;
         }
-        const otpMatches = await comparePassword(parsed.data.otp, verification.otpHash);
-        if (!otpMatches) {
-            res.status(400).json({ error: "Invalid verification code." });
-            return;
-        }
-        verification.verifiedAt = nowIso();
-        await saveDb(db);
         res.json({
             success: true,
             message: "Email verified successfully.",
@@ -935,34 +963,56 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
         return;
     }
     try {
-        const db = await loadDb();
-        consumeExpiredEmailVerifications(db);
-        if (db.users.some((user) => user.email === email)) {
+        // Locked: duplicate-check, verified-flag check, user creation, and the
+        // save must be atomic — otherwise a concurrent write can drop the verified
+        // flag between this read and write and signup wrongly refuses the email.
+        const outcome = await withDbLock(async () => {
+            const db = await loadDb();
+            consumeExpiredEmailVerifications(db);
+            if (db.users.some((user) => user.email === email)) {
+                return { duplicate: true };
+            }
+            const verification = getLatestEmailVerification(db, email);
+            if (!isEmailVerificationValid(verification)) {
+                return { error: "Verify your email with the OTP before creating the account." };
+            }
+            const timestamp = nowIso();
+            const user = {
+                id: createId(),
+                email,
+                firstName: sanitizeTextInput(parsed.data.firstName, 60),
+                lastName: sanitizeTextInput(parsed.data.lastName, 60),
+                passwordHash: await hashPassword(parsed.data.password),
+                createdAt: timestamp,
+                updatedAt: timestamp,
+                plan: "free",
+                preferences: {
+                    aiAssistantEnabled: true,
+                },
+            };
+            db.users.push(user);
+            markVerificationsConsumed(db.emailVerifications
+                .filter((entry) => entry.email === email && entry.purpose === "register")
+                .map((entry) => entry.id));
+            db.emailVerifications = db.emailVerifications.filter((entry) => !(entry.email === email && entry.purpose === "register"));
+            // Identity-critical: never report success unless the account actually
+            // reached persistent storage, otherwise it vanishes on restart and every
+            // later login 401s.
+            if (!(await saveDb(db))) {
+                return { error: "Your account could not be saved. Please try again in a moment." };
+            }
+            return { user };
+        });
+        if ("duplicate" in outcome) {
             res.json({ error: "Email is already registered", duplicateEmail: true });
             return;
         }
-        const verification = getLatestEmailVerification(db, email);
-        if (!isEmailVerificationValid(verification)) {
-            res.status(400).json({ error: "Verify your email with the OTP before creating the account." });
+        if ("error" in outcome) {
+            const status = outcome.error === "Your account could not be saved. Please try again in a moment." ? 503 : 400;
+            res.status(status).json({ error: outcome.error });
             return;
         }
-        const timestamp = nowIso();
-        const user = {
-            id: createId(),
-            email,
-            firstName: sanitizeTextInput(parsed.data.firstName, 60),
-            lastName: sanitizeTextInput(parsed.data.lastName, 60),
-            passwordHash: await hashPassword(parsed.data.password),
-            createdAt: timestamp,
-            updatedAt: timestamp,
-            plan: "free",
-            preferences: {
-                aiAssistantEnabled: true,
-            },
-        };
-        db.users.push(user);
-        db.emailVerifications = db.emailVerifications.filter((entry) => !(entry.email === email && entry.purpose === "register"));
-        await saveDb(db);
+        const { user } = outcome;
         const { token } = signAuthToken(user);
         const csrfToken = createCsrfToken();
         setAuthCookies(res, token, csrfToken, false);
@@ -1029,33 +1079,45 @@ app.post("/api/auth/google", tokenLimiter, async (req, res) => {
         return;
     }
     try {
-        const db = await loadDb();
-        let user = db.users.find((entry) => normalizeEmail(entry.email) === email);
-        if (!user) {
-            const localPart = email.split("@")[0];
-            const [firstName = "Google", lastName = "User"] = localPart
-                .split(/[.\-_]/)
-                .filter(Boolean)
-                .map((part) => part.charAt(0).toUpperCase() + part.slice(1));
-            user = {
-                id: createId(),
-                email,
-                firstName,
-                lastName,
-                passwordHash: await hashPassword(createId()),
-                createdAt: nowIso(),
-                updatedAt: nowIso(),
-                plan: "free",
-                preferences: {
-                    aiAssistantEnabled: true,
-                },
-            };
-            db.users.push(user);
-            await saveDb(db);
+        // Locked: find-or-create must be atomic so two simultaneous Google logins
+        // for a new address cannot create duplicate accounts.
+        const outcome = await withDbLock(async () => {
+            const db = await loadDb();
+            let user = db.users.find((entry) => normalizeEmail(entry.email) === email);
+            if (!user) {
+                const localPart = email.split("@")[0];
+                const [firstName = "Google", lastName = "User"] = localPart
+                    .split(/[.\-_]/)
+                    .filter(Boolean)
+                    .map((part) => part.charAt(0).toUpperCase() + part.slice(1));
+                user = {
+                    id: createId(),
+                    email,
+                    firstName,
+                    lastName,
+                    passwordHash: await hashPassword(createId()),
+                    createdAt: nowIso(),
+                    updatedAt: nowIso(),
+                    plan: "free",
+                    preferences: {
+                        aiAssistantEnabled: true,
+                    },
+                };
+                db.users.push(user);
+                if (!(await saveDb(db))) {
+                    return { error: "Your account could not be saved. Please try again in a moment." };
+                }
+            }
+            else if (refreshUserPlan(user)) {
+                await saveDb(db);
+            }
+            return { user };
+        });
+        if ("error" in outcome) {
+            res.status(503).json({ error: outcome.error });
+            return;
         }
-        if (refreshUserPlan(user)) {
-            await saveDb(db);
-        }
+        const { user } = outcome;
         const { token } = signAuthToken(user, parsed.data.rememberMe);
         const csrfToken = createCsrfToken();
         setAuthCookies(res, token, csrfToken, Boolean(parsed.data.rememberMe));
@@ -1088,16 +1150,29 @@ app.post("/api/auth/forgot-password", tokenLimiter, async (req, res) => {
         message: "If an account exists for this email, a password reset code has been sent.",
     };
     try {
-        const db = await loadDb();
-        consumeExpiredEmailVerifications(db);
-        const user = db.users.find((entry) => normalizeEmail(entry.email) === email);
-        if (!user) {
+        // Database span runs locked (same reason as registration OTPs); email
+        // delivery stays outside.
+        const staged = await withDbLock(async () => {
+            const db = await loadDb();
+            consumeExpiredEmailVerifications(db);
+            const user = db.users.find((entry) => normalizeEmail(entry.email) === email);
+            if (!user) {
+                return { unknown: true };
+            }
+            // Same issuance path as registration OTPs — identical code format,
+            // expiry, hashing, invalidation, and email → fallback delivery ladder.
+            const { otp, persisted } = await stageEmailOtp(db, email, "password_reset");
+            return { otp, persisted };
+        });
+        if ("unknown" in staged) {
             res.json(genericResponse);
             return;
         }
-        // Same issuance path as registration OTPs — identical code format, expiry,
-        // hashing, invalidation, and email → fallback delivery ladder.
-        const result = await issueEmailOtp(db, email, "password_reset", sendPasswordResetOtp, {
+        if (!staged.persisted) {
+            res.status(503).json({ error: "Failed to save the reset code. Please try again." });
+            return;
+        }
+        const result = await deliverEmailOtp(email, "password_reset", staged.otp, sendPasswordResetOtp, {
             sent: "If an account exists for this email, a password reset code has been sent.",
             unconfiguredFallback: "Email delivery is not configured right now. Use the temporary code shown below to reset your password.",
             testingFallback: "Email delivery is in testing mode. Use the temporary code shown below.",
@@ -1135,28 +1210,41 @@ app.post("/api/auth/reset-password", authLimiter, async (req, res) => {
         return;
     }
     try {
-        const db = await loadDb();
-        consumeExpiredEmailVerifications(db);
-        const user = db.users.find((entry) => normalizeEmail(entry.email) === email);
-        const verification = getLatestEmailVerification(db, email, "password_reset");
-        if (!user || !verification || new Date(verification.expiresAt).getTime() <= Date.now()) {
-            res.status(400).json({ error: "Reset code expired. Request a new code." });
+        // Locked: check, compare, password update, and code consumption must be
+        // atomic so a concurrent write can neither invalidate a live code early
+        // nor resurrect a consumed one.
+        const outcome = await withDbLock(async () => {
+            const db = await loadDb();
+            consumeExpiredEmailVerifications(db);
+            const user = db.users.find((entry) => normalizeEmail(entry.email) === email);
+            const verification = getLatestEmailVerification(db, email, "password_reset");
+            if (!user || !verification || new Date(verification.expiresAt).getTime() <= Date.now()) {
+                return { error: "Reset code expired. Request a new code." };
+            }
+            const otpMatches = await comparePassword(parsed.data.otp, verification.otpHash);
+            if (!otpMatches) {
+                return { error: "Invalid reset code." };
+            }
+            if (await comparePassword(parsed.data.newPassword, user.passwordHash)) {
+                return { error: "Choose a new password different from the current one." };
+            }
+            user.passwordHash = await hashPassword(parsed.data.newPassword);
+            user.updatedAt = nowIso();
+            // Single-use code: drop all reset verifications for this email.
+            markVerificationsConsumed(db.emailVerifications
+                .filter((entry) => entry.email === email && entry.purpose === "password_reset")
+                .map((entry) => entry.id));
+            db.emailVerifications = db.emailVerifications.filter((entry) => !(entry.email === email && entry.purpose === "password_reset"));
+            if (!(await saveDb(db))) {
+                return { error: "Your new password could not be saved. Request a new code and try again." };
+            }
+            return { reset: true };
+        });
+        if ("error" in outcome) {
+            const status = outcome.error === "Your new password could not be saved. Request a new code and try again." ? 503 : 400;
+            res.status(status).json({ error: outcome.error });
             return;
         }
-        const otpMatches = await comparePassword(parsed.data.otp, verification.otpHash);
-        if (!otpMatches) {
-            res.status(400).json({ error: "Invalid reset code." });
-            return;
-        }
-        if (await comparePassword(parsed.data.newPassword, user.passwordHash)) {
-            res.status(400).json({ error: "Choose a new password different from the current one." });
-            return;
-        }
-        user.passwordHash = await hashPassword(parsed.data.newPassword);
-        user.updatedAt = nowIso();
-        // Single-use code: drop all reset verifications for this email.
-        db.emailVerifications = db.emailVerifications.filter((entry) => !(entry.email === email && entry.purpose === "password_reset"));
-        await saveDb(db);
         res.json({ success: true, message: "Password reset successfully. Sign in with your new password." });
     }
     catch (error) {
@@ -1178,24 +1266,32 @@ app.post("/api/auth/change-password", requireAuth, requireCsrf, async (req, res)
         return;
     }
     try {
-        const db = await loadDb();
-        const user = db.users.find((entry) => entry.id === req.auth.userId);
-        if (!user) {
-            res.status(404).json({ error: "User not found" });
+        // Locked: verify-then-update must be atomic so the password change cannot
+        // be silently dropped by a concurrent write.
+        const outcome = await withDbLock(async () => {
+            const db = await loadDb();
+            const user = db.users.find((entry) => entry.id === req.auth.userId);
+            if (!user) {
+                return { error: "User not found", status: 404 };
+            }
+            const passwordMatches = await comparePassword(parsed.data.currentPassword, user.passwordHash);
+            if (!passwordMatches) {
+                return { error: "Current password is incorrect.", status: 400 };
+            }
+            if (await comparePassword(parsed.data.newPassword, user.passwordHash)) {
+                return { error: "Choose a new password different from the current one.", status: 400 };
+            }
+            user.passwordHash = await hashPassword(parsed.data.newPassword);
+            user.updatedAt = nowIso();
+            if (!(await saveDb(db))) {
+                return { error: "Your new password could not be saved. Please try again.", status: 503 };
+            }
+            return { changed: true };
+        });
+        if ("error" in outcome) {
+            res.status(outcome.status).json({ error: outcome.error });
             return;
         }
-        const passwordMatches = await comparePassword(parsed.data.currentPassword, user.passwordHash);
-        if (!passwordMatches) {
-            res.status(400).json({ error: "Current password is incorrect." });
-            return;
-        }
-        if (await comparePassword(parsed.data.newPassword, user.passwordHash)) {
-            res.status(400).json({ error: "Choose a new password different from the current one." });
-            return;
-        }
-        user.passwordHash = await hashPassword(parsed.data.newPassword);
-        user.updatedAt = nowIso();
-        await saveDb(db);
         res.json({ success: true, message: "Password changed successfully." });
     }
     catch (error) {
@@ -1318,18 +1414,30 @@ app.post("/api/billing/subscribe", requireAuth, requireCsrf, async (req, res) =>
         res.status(400).json({ error: "Invalid subscription request" });
         return;
     }
-    const db = await loadDb();
-    const user = db.users.find((entry) => entry.id === req.auth.userId);
-    if (!user) {
-        res.status(404).json({ error: "User not found" });
+    // Locked: the upgrade must not be dropped by a concurrent write, or the
+    // user pays (or clicks) yet stays on free.
+    const outcome = await withDbLock(async () => {
+        const db = await loadDb();
+        const user = db.users.find((entry) => entry.id === req.auth.userId);
+        if (!user) {
+            return { error: "User not found" };
+        }
+        const paymentDate = nowIso();
+        user.plan = "pro";
+        user.subscriptionStartedAt = paymentDate;
+        user.subscriptionExpiresAt = new Date(Date.now() + MONTH_IN_MS).toISOString();
+        user.updatedAt = paymentDate;
+        if (!(await saveDb(db))) {
+            return { error: "Your Pro upgrade could not be saved. Please try again." };
+        }
+        return { user };
+    });
+    if ("error" in outcome) {
+        const status = outcome.error === "User not found" ? 404 : 503;
+        res.status(status).json({ error: outcome.error });
         return;
     }
-    const paymentDate = nowIso();
-    user.plan = "pro";
-    user.subscriptionStartedAt = paymentDate;
-    user.subscriptionExpiresAt = new Date(Date.now() + MONTH_IN_MS).toISOString();
-    user.updatedAt = paymentDate;
-    await saveDb(db);
+    const { user } = outcome;
     res.json({
         user: userResponse(user),
         message: "Pro subscription activated for 30 days.",
@@ -2660,6 +2768,11 @@ ensureDataDirs()
     server = app.listen(port, () => {
         logger.info({ port }, "UniLink API listening");
     });
+    // Boot-time persistence self-check: if the database cannot be read here,
+    // signups would silently become memory-only phantom accounts.
+    loadDb()
+        .then((db) => logger.info({ users: db.users.length, storageAvailable: isStorageAvailable() }, "Persistence check at startup"))
+        .catch((error) => logger.error({ error: error instanceof Error ? error.message : String(error) }, "Persistence check at startup FAILED — accounts may not survive restarts"));
     server.requestTimeout = UPLOAD_REQUEST_TIMEOUT_MS;
     server.headersTimeout = UPLOAD_REQUEST_TIMEOUT_MS + 60_000;
     server.keepAliveTimeout = 65_000;

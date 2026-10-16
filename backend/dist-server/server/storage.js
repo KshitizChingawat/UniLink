@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { supabase, DB_BUCKET } from "./supabase.js";
+import { logger } from "./logger.js";
 const DB_OBJECT_PATH = "db.json";
 const initialDb = {
     users: [],
@@ -13,6 +14,34 @@ const initialDb = {
     emailVerifications: [],
 };
 let writeLock = Promise.resolve();
+// Serializes read-modify-write critical sections for auth/identity flows
+// (OTP issue/verify, signup, password changes, upgrades). Chained writes in
+// saveDb alone are NOT enough: a concurrent request can still load a stale
+// snapshot between another request's load and save and then clobber it.
+// Keep slow external I/O (email sending) OUTSIDE the locked span.
+let dbMutex = Promise.resolve();
+export const withDbLock = async (fn) => {
+    const run = dbMutex.catch(() => undefined).then(fn);
+    dbMutex = run.then(() => undefined, () => undefined);
+    return run;
+};
+// Last snapshot successfully written to the remote backend. Used to re-attach
+// users created by concurrent requests (read-modify-write races) so one
+// signup can never silently drop another. Safe because user records are never
+// deleted anywhere in the app — only added or updated in place.
+let lastPersistedDb = null;
+// IDs of OTP verifications deliberately consumed (signup/reset completed).
+// A consumed code must never merge back into the database via the rule below.
+const consumedVerificationIds = new Map();
+const CONSUMED_ID_RETENTION_MS = 30 * 60 * 1000;
+export const isStorageAvailable = () => storageAvailable;
+// Call after deleting verifications for a completed signup/password-reset so
+// a concurrent save can never resurrect the single-use code.
+export const markVerificationsConsumed = (ids) => {
+    const now = Date.now();
+    for (const id of ids)
+        consumedVerificationIds.set(id, now);
+};
 // In-memory fallback cache — used when the storage backend (Supabase) is unavailable.
 // This ensures data persists between requests during the process lifetime, enabling
 // OTP verification and registration to work without external storage.
@@ -49,6 +78,8 @@ export const ensureDataDirs = async () => { };
 export const createId = () => randomUUID();
 export const resetMemoryCache = () => {
     memoryCache = null;
+    lastPersistedDb = null;
+    consumedVerificationIds.clear();
     storageAvailable = true;
 };
 const readDb = async () => {
@@ -134,21 +165,70 @@ export const loadDb = async () => {
 };
 export const saveDb = async (db) => {
     // Always keep in-memory cache in sync
-    memoryCache = normalizeDb(db);
+    const normalized = normalizeDb(db);
+    memoryCache = normalized;
+    // Resolves true only when this snapshot actually reached remote storage.
+    // Auth-identity writes (signup, password changes) must check this: a
+    // "success" that never persisted becomes a phantom account that vanishes on
+    // restart and then 401s at login. Returns false instead of throwing so
+    // retryable flows (chunk progress, clipboard sync) can degrade gracefully.
+    let persisted = false;
     // Chain writes so they never run in parallel
     writeLock = writeLock
         .catch(() => undefined)
         .then(async () => {
-        // Persist the caller's normalized snapshot directly. The write lock
-        // already serializes mutations, and merging by id here causes deleted
-        // records such as file transfers to be resurrected on the next save.
-        const normalizedDb = normalizeDb(db);
-        try {
-            await writeDb(JSON.stringify(normalizedDb, null, 2));
+        // Merge inside the serialized section, against the LATEST persisted
+        // snapshot: re-attach users added by a concurrent request that read the
+        // database before this snapshot was taken. (Deletes of other record
+        // types still apply — only users are merged, and users are never
+        // deleted — so nothing resurrected here can surprise a delete flow.)
+        const snapshot = {
+            ...normalized,
+            users: [...normalized.users],
+            emailVerifications: [...normalized.emailVerifications],
+        };
+        if (lastPersistedDb) {
+            const knownIds = new Set(snapshot.users.map((user) => user.id));
+            const knownEmails = new Set(snapshot.users.map((user) => user.email.toLowerCase()));
+            for (const user of lastPersistedDb.users) {
+                if (!knownIds.has(user.id) && !knownEmails.has(user.email.toLowerCase())) {
+                    snapshot.users.push(user);
+                }
+            }
+            // Same race protection for OTP codes: re-attach verifications created
+            // concurrently — but NEVER ones the caller deliberately replaced
+            // (superseded: same email+purpose present), consumed (single-use), or
+            // expired. Otherwise a concurrent signup/reset could wipe a live code.
+            const now = Date.now();
+            for (const [id, at] of consumedVerificationIds) {
+                if (now - at > CONSUMED_ID_RETENTION_MS)
+                    consumedVerificationIds.delete(id);
+            }
+            const callerPurposes = new Set(snapshot.emailVerifications.map((entry) => `${entry.email}::${entry.purpose}`));
+            const knownVerificationIds = new Set(snapshot.emailVerifications.map((entry) => entry.id));
+            for (const entry of lastPersistedDb.emailVerifications) {
+                if (knownVerificationIds.has(entry.id))
+                    continue;
+                if (callerPurposes.has(`${entry.email}::${entry.purpose}`))
+                    continue;
+                if (consumedVerificationIds.has(entry.id))
+                    continue;
+                if (new Date(entry.expiresAt).getTime() <= now)
+                    continue;
+                snapshot.emailVerifications.push(entry);
+            }
+            // The merged snapshot is the freshest known state — serve it from memory too.
+            memoryCache = snapshot;
         }
-        catch {
-            // Storage backend unavailable — silently skip persistence.
+        try {
+            await writeDb(JSON.stringify(snapshot, null, 2));
+            lastPersistedDb = snapshot;
+            persisted = true;
+        }
+        catch (error) {
+            logger.error({ error: error instanceof Error ? error.message : String(error) }, "Failed to persist database to Supabase Storage — recent changes are memory-only and will be lost on restart");
         }
     });
     await writeLock;
+    return persisted;
 };
