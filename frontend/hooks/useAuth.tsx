@@ -27,6 +27,7 @@ interface AuthContextValue {
   verifyRegistrationOtp: (email: string, otp: string) => Promise<{ error: Error | null }>;
   requestPasswordReset: (email: string) => Promise<{ error: Error | null; developmentOtp?: string | null; deliveryMode?: "email" | "fallback" | null }>;
   resetPassword: (email: string, otp: string, newPassword: string, confirmPassword: string) => Promise<{ error: Error | null }>;
+  getEmailStatus: () => Promise<{ emailConfigured: boolean; otpFallbackEnabled: boolean } | null>;
   signInWithGoogle: (email: string, rememberMe?: boolean) => Promise<{ error: Error | null }>;
   signOut: () => Promise<{ success?: boolean; error?: Error }>;
   updateProfile: (profile: Partial<User>) => Promise<void>;
@@ -382,6 +383,17 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
   };
 
+    // Best-effort server capability check (no toasts): tells the UI whether
+  // codes can arrive by email or only via on-screen fallback.
+  const getEmailStatus = async () => {
+    try {
+      const data = await apiFetch<{ emailConfigured: boolean; otpFallbackEnabled: boolean }>("/api/auth/email-status");
+      return data;
+    } catch {
+      return null;
+    }
+  };
+
   const signOut = async () => {    try {
       try {
         await apiFetch("/api/auth/logout", {
@@ -456,6 +468,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       verifyRegistrationOtp,
       requestPasswordReset,
       resetPassword,
+      getEmailStatus,
       signInWithGoogle,
       signOut,
       updateProfile,

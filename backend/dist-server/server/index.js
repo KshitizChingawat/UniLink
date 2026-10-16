@@ -795,6 +795,52 @@ app.get("/api/auth/email-status", (_req, res) => {
         otpFallbackEnabled: OTP_FALLBACK_ENABLED,
     });
 });
+// THE single OTP issuance path for every email-code flow (registration,
+// password reset, ...). Each call mints a fresh unique code, invalidates older
+// codes for the same email+purpose, stores only a hash (10-minute expiry),
+// and follows the exact same delivery ladder: real email → testing/failure
+// fallback code → unconfigured signal. Callers only differ in pre-checks
+// (e.g. duplicate account, unknown account) and wording.
+const issueEmailOtp = async (db, email, purpose, sendMail, messages) => {
+    const otp = createOtp();
+    const timestamp = nowIso();
+    const verification = {
+        id: createId(),
+        email,
+        purpose,
+        otpHash: await hashPassword(otp),
+        createdAt: timestamp,
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    };
+    db.emailVerifications = db.emailVerifications.filter((entry) => !(entry.email === email && entry.purpose === purpose));
+    db.emailVerifications.unshift(verification);
+    await saveDb(db);
+    if (!isEmailVerificationConfigured()) {
+        if (OTP_FALLBACK_ENABLED) {
+            logger.info({ email, purpose }, "OTP email not configured — returning one-time fallback code");
+            return registrationOtpFallbackResponse(messages.unconfiguredFallback, otp);
+        }
+        return { unconfigured: true };
+    }
+    try {
+        await sendMail(email, otp);
+        return {
+            success: true,
+            message: messages.sent,
+            deliveryMode: "email",
+        };
+    }
+    catch (mailError) {
+        if (OTP_FALLBACK_ENABLED) {
+            const fallbackMessage = isMailtrapDemoRestrictionError(mailError)
+                ? messages.testingFallback
+                : messages.unavailableFallback;
+            logger.warn({ email, purpose, error: mailError instanceof Error ? mailError.message : String(mailError) }, "OTP email failed — returning one-time fallback code");
+            return registrationOtpFallbackResponse(fallbackMessage, otp);
+        }
+        throw mailError;
+    }
+};
 app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) => {
     const parsed = registrationOtpRequestSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -814,50 +860,20 @@ app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) =>
             res.status(409).json({ error: "Email is already registered" });
             return;
         }
-        const otp = createOtp();
-        const timestamp = nowIso();
-        const verification = {
-            id: createId(),
-            email,
-            purpose: "register",
-            otpHash: await hashPassword(otp),
-            createdAt: timestamp,
-            expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-        };
-        db.emailVerifications = db.emailVerifications.filter((entry) => !(entry.email === email && entry.purpose === "register"));
-        db.emailVerifications.unshift(verification);
-        await saveDb(db);
-        if (!isEmailVerificationConfigured()) {
-            if (OTP_FALLBACK_ENABLED) {
-                logger.info({ email }, "OTP email not configured — returning one-time fallback code");
-                res.json(registrationOtpFallbackResponse("Email delivery is not configured right now. Use the temporary OTP shown below to continue signup.", otp));
-                return;
-            }
+        const result = await issueEmailOtp(db, email, "register", sendRegistrationOtp, {
+            sent: "Verification code sent to your email.",
+            unconfiguredFallback: "Email delivery is not configured right now. Use the temporary OTP shown below to continue signup.",
+            testingFallback: "Email delivery is in testing mode. Use the temporary OTP shown below.",
+            unavailableFallback: "Email delivery is temporarily unavailable. Use the temporary OTP shown below to continue signup.",
+        });
+        if ("unconfigured" in result) {
             res.status(503).json({
                 error: "Email verification is not configured yet. Add SMTP settings on the server first.",
             });
             return;
         }
-        try {
-            await sendRegistrationOtp(email, otp);
-            res.json({
-                success: true,
-                message: "Verification code sent to your email.",
-                deliveryMode: "email",
-            });
-            return;
-        }
-        catch (mailError) {
-            if (OTP_FALLBACK_ENABLED) {
-                const fallbackMessage = isMailtrapDemoRestrictionError(mailError)
-                    ? "Email delivery is in testing mode. Use the temporary OTP shown below."
-                    : "Email delivery is temporarily unavailable. Use the temporary OTP shown below to continue signup.";
-                logger.warn({ email, error: mailError instanceof Error ? mailError.message : String(mailError) }, "OTP email failed — returning one-time fallback code");
-                res.json(registrationOtpFallbackResponse(fallbackMessage, otp));
-                return;
-            }
-            throw mailError;
-        }
+        res.json(result);
+        return;
     }
     catch (error) {
         console.error("Registration OTP error:", error);
@@ -1074,46 +1090,20 @@ app.post("/api/auth/forgot-password", tokenLimiter, async (req, res) => {
             res.json(genericResponse);
             return;
         }
-        // Fresh unique OTP per request; any previous reset code is invalidated.
-        const otp = createOtp();
-        const timestamp = nowIso();
-        const verification = {
-            id: createId(),
-            email,
-            purpose: "password_reset",
-            otpHash: await hashPassword(otp),
-            createdAt: timestamp,
-            expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-        };
-        db.emailVerifications = db.emailVerifications.filter((entry) => !(entry.email === email && entry.purpose === "password_reset"));
-        db.emailVerifications.unshift(verification);
-        await saveDb(db);
-        if (!isEmailVerificationConfigured()) {
-            if (OTP_FALLBACK_ENABLED) {
-                logger.info({ email }, "Password reset email not configured — returning one-time fallback code");
-                res.json(registrationOtpFallbackResponse("Email delivery is not configured right now. Use the temporary code shown below to reset your password.", otp));
-                return;
-            }
+        // Same issuance path as registration OTPs — identical code format, expiry,
+        // hashing, invalidation, and email → fallback delivery ladder.
+        const result = await issueEmailOtp(db, email, "password_reset", sendPasswordResetOtp, {
+            sent: "If an account exists for this email, a password reset code has been sent.",
+            unconfiguredFallback: "Email delivery is not configured right now. Use the temporary code shown below to reset your password.",
+            testingFallback: "Email delivery is in testing mode. Use the temporary code shown below.",
+            unavailableFallback: "Email delivery is temporarily unavailable. Use the temporary code shown below to reset your password.",
+        });
+        if ("unconfigured" in result) {
             res.json(genericResponse);
             return;
         }
-        try {
-            await sendPasswordResetOtp(email, otp);
-            res.json({
-                success: true,
-                message: "If an account exists for this email, a password reset code has been sent.",
-                deliveryMode: "email",
-            });
-            return;
-        }
-        catch (mailError) {
-            if (OTP_FALLBACK_ENABLED) {
-                logger.warn({ email, error: mailError instanceof Error ? mailError.message : String(mailError) }, "Password reset email failed — returning one-time fallback code");
-                res.json(registrationOtpFallbackResponse("Email delivery is temporarily unavailable. Use the temporary code shown below to reset your password.", otp));
-                return;
-            }
-            throw mailError;
-        }
+        res.json(result);
+        return;
     }
     catch (error) {
         console.error("Forgot password error:", error);

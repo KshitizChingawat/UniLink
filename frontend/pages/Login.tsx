@@ -51,7 +51,8 @@ const Login = () => {
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showConfirmNewPassword, setShowConfirmNewPassword] = useState(false);
-  const { signIn, signInWithGoogle, requestPasswordReset, resetPassword } = useAuth();
+  const [resetServerWarning, setResetServerWarning] = useState<string | null>(null);
+  const { signIn, signInWithGoogle, requestPasswordReset, resetPassword, getEmailStatus } = useAuth();
   const normalizedEmail = email.trim().toLowerCase();
   const emailLooksValid =
     !email || (
@@ -118,6 +119,7 @@ const Login = () => {
     setConfirmNewPassword('');
     setShowNewPassword(false);
     setShowConfirmNewPassword(false);
+    setResetServerWarning(null);
     setForgotOpen(true);
   };
 
@@ -137,6 +139,21 @@ const Login = () => {
     setResetOtp('');
     setResetDevelopmentOtp(result.developmentOtp || '');
     setResetDeliveryMode(result.deliveryMode || 'email');
+    setResetServerWarning(null);
+    // The server answered success but supplied no on-screen code: find out
+    // why so the user isn't left waiting for mail that can't arrive.
+    if (!result.developmentOtp) {
+      const status = await getEmailStatus();
+      if (status && !status.emailConfigured) {
+        setResetServerWarning(
+          'Server email delivery is off and no temporary code was provided. Press Resend to request a temporary code.',
+        );
+      } else if (!status) {
+        setResetServerWarning(
+          'The server did not provide a reset code. It may be running an older version — please try again after it updates.',
+        );
+      }
+    }
     setForgotStep('reset');
   };
 
@@ -376,6 +393,11 @@ const Login = () => {
                 <p className="text-sm text-slate-600 dark:text-slate-300">
                   Resetting password for <span className="font-semibold">{forgotEmail}</span>
                 </p>
+                {resetServerWarning && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+                    {resetServerWarning}
+                  </div>
+                )}
                 {resetDeliveryMode === 'fallback' && resetDevelopmentOtp && (
                   <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
                     <p className="font-medium">Temporary reset code</p>
