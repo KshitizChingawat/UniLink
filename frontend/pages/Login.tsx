@@ -52,6 +52,7 @@ const Login = () => {
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showConfirmNewPassword, setShowConfirmNewPassword] = useState(false);
   const [resetServerWarning, setResetServerWarning] = useState<string | null>(null);
+  const [resetMailProvider, setResetMailProvider] = useState<'mailtrap-api' | 'smtp' | 'none' | null>(null);
   const { signIn, signInWithGoogle, requestPasswordReset, resetPassword, getEmailStatus } = useAuth();
   const normalizedEmail = email.trim().toLowerCase();
   const emailLooksValid =
@@ -120,6 +121,7 @@ const Login = () => {
     setShowNewPassword(false);
     setShowConfirmNewPassword(false);
     setResetServerWarning(null);
+    setResetMailProvider(null);
     setForgotOpen(true);
   };
 
@@ -140,6 +142,7 @@ const Login = () => {
     setResetDevelopmentOtp(result.developmentOtp || '');
     setResetDeliveryMode(result.deliveryMode || 'email');
     setResetServerWarning(null);
+    setResetMailProvider(null);
     // The server answered success but supplied no on-screen code: find out
     // why so the user isn't left waiting for mail that can't arrive.
     if (!result.developmentOtp) {
@@ -152,6 +155,9 @@ const Login = () => {
         setResetServerWarning(
           'The server did not provide a reset code. It may be running an older version — please try again after it updates.',
         );
+      } else {
+        // Email path: remember the provider so the hint points at the right inbox.
+        setResetMailProvider(status.provider || null);
       }
     }
     setForgotStep('reset');
@@ -430,9 +436,11 @@ const Login = () => {
                     </Button>
                   </div>
                   <p className="text-xs text-slate-500">
-                    {resetDeliveryMode === 'email'
-                      ? 'Check your inbox (and spam folder) for the code.'
-                      : 'Each resend generates a fresh code and invalidates the previous one.'}
+                    {resetDeliveryMode === 'email' && resetMailProvider === 'mailtrap-api'
+                      ? 'The code was sent to your Mailtrap test inbox — open the Mailtrap dashboard, not Gmail. Sandbox mail never reaches real inboxes.'
+                      : resetDeliveryMode === 'email'
+                        ? 'Check your inbox (and spam folder) for the code.'
+                        : 'Each resend generates a fresh code and invalidates the previous one.'}
                   </p>
                 </div>
                 <div className="space-y-2">

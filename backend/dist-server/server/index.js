@@ -10,7 +10,7 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { z } from "zod";
 import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
-import { isEmailVerificationConfigured, isMailtrapDemoRestrictionError, sendPasswordResetOtp, sendRegistrationOtp } from "./mailer.js";
+import { getEmailProvider, isEmailVerificationConfigured, isMailtrapDemoRestrictionError, sendPasswordResetOtp, sendRegistrationOtp } from "./mailer.js";
 import { clearAuthCookies, comparePassword, createCsrfToken, hashPassword, requireAuth, requireCsrf, revokeToken, sanitizeUser, setAuthCookies, signAuthToken } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
 import { ensureRelativeStoragePath, isZipBombCandidate, nowIso, parseRangeHeader, planChunkedByteRange, sanitizeFilename, sanitizeMimeType, sanitizeTextInput } from "./helpers.js";
@@ -793,11 +793,14 @@ app.get("/api/health", async (_req, res) => {
     }
 });
 // Public capability flags (booleans only, no secrets) so the frontend and
-// operators can tell why codes arrive by email vs. on-screen fallback.
+// operators can tell why codes arrive by email vs. on-screen fallback — and,
+// when by email, through WHICH provider (a "sent" code via a Mailtrap test
+// inbox never reaches a real Gmail inbox).
 app.get("/api/auth/email-status", (_req, res) => {
     res.json({
         emailConfigured: isEmailVerificationConfigured(),
         otpFallbackEnabled: OTP_FALLBACK_ENABLED,
+        provider: getEmailProvider(),
     });
 });
 // THE single OTP issuance path for every email-code flow (registration,
@@ -833,7 +836,10 @@ const deliverEmailOtp = async (email, purpose, otp, sendMail, messages) => {
         return { unconfigured: true };
     }
     try {
-        await sendMail(email, otp);
+        // Logged with provider + id so Render logs prove exactly where each code
+        // went (e.g. mailtrap-api id=... vs smtp id=...).
+        const messageId = await sendMail(email, otp);
+        logger.info({ email, purpose, provider: getEmailProvider(), messageId }, "OTP email accepted for delivery");
         return {
             success: true,
             message: messages.sent,

@@ -31,7 +31,26 @@ const transporter = canSendMail
 
 export const isEmailVerificationConfigured = () => Boolean(transporter);
 
-export const sendRegistrationOtp = async (email: string, otp: string) => {
+// Which channel actually carries outbound mail. Exposed via /api/auth/email-status
+// (no secrets) so anyone can tell where a "sent" code really went: real SMTP
+// inboxes vs. a Mailtrap test inbox (sandbox mail NEVER reaches Gmail).
+export const getEmailProvider = (): "mailtrap-api" | "smtp" | "none" => {
+  if (!transporter) return "none";
+  return shouldUseMailtrapApi ? "mailtrap-api" : "smtp";
+};
+
+// Best-effort message id from a Mailtrap Send API response body.
+const extractMailtrapMessageId = (payloadText: string): string => {
+  try {
+    const payload = JSON.parse(payloadText) as { message_ids?: string[] };
+    const id = payload?.message_ids?.[0];
+    return typeof id === "string" && id ? id : "unknown";
+  } catch {
+    return "unknown";
+  }
+};
+
+export const sendRegistrationOtp = async (email: string, otp: string): Promise<string> => {
   if (!SMTP_FROM) {
     throw new Error("Email verification is not configured on the server.");
   }
@@ -82,14 +101,14 @@ export const sendRegistrationOtp = async (email: string, otp: string) => {
       const payload = await response.text();
       throw new Error(`Mailtrap API rejected the OTP email: ${payload || response.statusText}`);
     }
-    return;
+    return extractMailtrapMessageId(await response.text());
   }
 
   if (!transporter) {
     throw new Error("Email verification is not configured on the server.");
   }
 
-  await Promise.race([
+  const info = await Promise.race([
     transporter.sendMail({
       from: SMTP_FROM,
       to: email,
@@ -109,10 +128,11 @@ export const sendRegistrationOtp = async (email: string, otp: string) => {
     new Promise((_, reject) =>
       setTimeout(() => reject(new Error("Email delivery timed out. Check SMTP settings and sender domain.")), 20000),
     ),
-  ]);
+  ]) as { messageId?: string } | undefined;
+  return info?.messageId || "unknown";
 };
 
-export const sendPasswordResetOtp = async (email: string, otp: string) => {
+export const sendPasswordResetOtp = async (email: string, otp: string): Promise<string> => {
   if (!SMTP_FROM) {
     throw new Error("Email verification is not configured on the server.");
   }
@@ -164,19 +184,20 @@ export const sendPasswordResetOtp = async (email: string, otp: string) => {
       const payload = await response.text();
       throw new Error(`Mailtrap API rejected the password reset email: ${payload || response.statusText}`);
     }
-    return;
+    return extractMailtrapMessageId(await response.text());
   }
 
   if (!transporter) {
     throw new Error("Email verification is not configured on the server.");
   }
 
-  await Promise.race([
+  const info = await Promise.race([
     transporter.sendMail({ from: SMTP_FROM, to: email, subject, text, html }),
     new Promise((_, reject) =>
       setTimeout(() => reject(new Error("Email delivery timed out. Check SMTP settings and sender domain.")), 20000),
     ),
-  ]);
+  ]) as { messageId?: string } | undefined;
+  return info?.messageId || "unknown";
 };
 
 export const isMailtrapDemoRestrictionError = (error: unknown) => {
