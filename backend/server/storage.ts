@@ -126,6 +126,12 @@ export const loadDb = async (): Promise<AppDatabase> => {
   try {
     const raw = await readDb();
     storageAvailable = true;
+    if (!raw && memoryCache) {
+      // Supabase returned nothing (missing db.json, bad key, transient error).
+      // readDb swallows failures as null, so without this guard every request
+      // would wipe in-process OTPs and fresh signups with an empty database.
+      return memoryCache;
+    }
     const db = normalizeDb(raw ? (JSON.parse(raw) as Partial<AppDatabase>) : null);
     memoryCache = db;
     return db;

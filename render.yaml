@@ -24,7 +24,7 @@ services:
       - key: ALLOW_OTP_FALLBACK
         value: "true"
       - key: ALLOW_DEMO_GOOGLE_LOGIN
-        value: "false"
+        value: "true"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY

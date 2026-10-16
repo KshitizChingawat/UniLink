@@ -153,7 +153,10 @@ const PRO_FILE_SIZE_LIMIT = Math.max(10 * 1024 * 1024 * 1024, MAX_SINGLE_FILE_SI
 const SYNC_COMPLETE_UPLOAD_LIMIT_BYTES = 256 * 1024 * 1024;
 const MONTH_IN_MS = 30 * 24 * 60 * 60 * 1000;
 const OTP_FALLBACK_ENABLED = appConfig.allowOtpFallback;
-const DEMO_GOOGLE_LOGIN_ENABLED = !isProduction && appConfig.allowDemoGoogleLogin;
+// Demo Google login is gated ONLY by env flag so Render (production) can enable it
+// via ALLOW_DEMO_GOOGLE_LOGIN=true. Previously `!isProduction &&` hard-disabled it
+// on the deployed site, returning 501 for every Google attempt.
+const DEMO_GOOGLE_LOGIN_ENABLED = appConfig.allowDemoGoogleLogin;
 const strictContentSecurityPolicyDirectives = {
     defaultSrc: ["'self'"],
     scriptSrc: ["'self'"],
@@ -366,6 +369,9 @@ const assertValidEmailAddress = (email) => {
     }
     return null;
 };
+// Crypto-secure 6-digit code. Called fresh on EVERY request-otp call, and the
+// handler below deletes any previous pending code for that email first, so each
+// attempt yields a unique, single-use OTP valid for 10 minutes.
 const createOtp = () => `${randomInt(100000, 1000000)}`;
 const isStrongPassword = (password) => password.length >= 8 && /[^A-Za-z0-9]/.test(password);
 const isValidMobileNumber = (mobileNumber) => /^\+\d{1,3}\s\d{4}-\d{6}$/.test(mobileNumber.trim());
@@ -770,6 +776,7 @@ app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) =>
         await saveDb(db);
         if (!isEmailVerificationConfigured()) {
             if (OTP_FALLBACK_ENABLED) {
+                logger.info({ email }, "OTP email not configured — returning one-time fallback code");
                 res.json(registrationOtpFallbackResponse("Email delivery is not configured right now. Use the temporary OTP shown below to continue signup.", otp));
                 return;
             }
@@ -783,6 +790,7 @@ app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) =>
             res.json({
                 success: true,
                 message: "Verification code sent to your email.",
+                deliveryMode: "email",
             });
             return;
         }
@@ -791,6 +799,7 @@ app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) =>
                 const fallbackMessage = isMailtrapDemoRestrictionError(mailError)
                     ? "Email delivery is in testing mode. Use the temporary OTP shown below."
                     : "Email delivery is temporarily unavailable. Use the temporary OTP shown below to continue signup.";
+                logger.warn({ email, error: mailError instanceof Error ? mailError.message : String(mailError) }, "OTP email failed — returning one-time fallback code");
                 res.json(registrationOtpFallbackResponse(fallbackMessage, otp));
                 return;
             }

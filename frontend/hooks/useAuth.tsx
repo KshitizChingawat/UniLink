@@ -279,10 +279,12 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
 
     try {
+      // 45s: backend SMTP delivery can take up to ~20s before it falls back
+      // to an on-screen temporary OTP — do not abort before that arrives.
       const data = await fetchWithTimeout<{ message: string; developmentOtp?: string; deliveryMode?: "email" | "fallback" }>("/api/auth/request-registration-otp", {
         method: "POST",
         body: JSON.stringify({ email: normalizedEmail }),
-      });
+      }, 45000);
       toast.success(data.message);
       return {
         error: null,
