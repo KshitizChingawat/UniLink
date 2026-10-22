@@ -1449,11 +1449,16 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
       db.emailVerifications = db.emailVerifications.filter(
         (entry) => !(entry.email === email && entry.purpose === "register"),
       );
-      // Identity-critical: never report success unless the account actually
-      // reached persistent storage, otherwise it vanishes on restart and every
-      // later login 401s.
-      if (!(await saveDb(db))) {
-        return { error: "Your account could not be saved. Please try again in a moment." as const };
+      // Identity-critical: never report success unless the account reached the
+      // shared durable store. Saving only to the host-local disk journal looks
+      // like success, but Render's ephemeral disk is wiped on redeploy/restart,
+      // so the new account vanishes and every later login returns 401.
+      const saved = await saveDb(db);
+      if (saved !== "remote") {
+        return {
+          error:
+            "Your account could not be saved durably. Please try again in a moment.",
+        } as const;
       }
       return { user };
     });
@@ -1464,7 +1469,10 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
     }
 
     if ("error" in outcome) {
-      const status = outcome.error === "Your account could not be saved. Please try again in a moment." ? 503 : 400;
+      const status =
+        outcome.error === "Your account could not be saved durably. Please try again in a moment."
+          ? 503
+          : 400;
       res.status(status).json({ error: outcome.error });
       return;
     }
@@ -1751,14 +1759,21 @@ app.post("/api/auth/reset-password", authLimiter, async (req, res) => {
       db.emailVerifications = db.emailVerifications.filter(
         (entry) => !(entry.email === email && entry.purpose === "password_reset"),
       );
-      if (!(await saveDb(db))) {
-        return { error: "Your new password could not be saved. Request a new code and try again." as const };
+      const saved = await saveDb(db);
+      if (saved !== "remote") {
+        return {
+          error:
+            "Your new password could not be saved durably. Please try again in a moment.",
+        } as const;
       }
       return { reset: true as const };
     });
 
     if ("error" in outcome) {
-      const status = outcome.error === "Your new password could not be saved. Request a new code and try again." ? 503 : 400;
+      const status =
+        outcome.error === "Your new password could not be saved durably. Please try again in a moment."
+          ? 503
+          : 400;
       res.status(status).json({ error: outcome.error });
       return;
     }
@@ -1806,8 +1821,12 @@ app.post("/api/auth/change-password", requireAuth, requireCsrf, async (req: Auth
 
       user.passwordHash = await hashPassword(parsed.data.newPassword);
       user.updatedAt = nowIso();
-      if (!(await saveDb(db))) {
-        return { error: "Your new password could not be saved. Please try again." as const, status: 503 as const };
+      const saved = await saveDb(db);
+      if (saved !== "remote") {
+        return {
+          error: "Your new password could not be saved durably. Please try again." as const,
+          status: 503 as const,
+        };
       }
       return { changed: true as const };
     });
