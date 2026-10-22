@@ -6,6 +6,12 @@ import { getBrowserDeviceName, isGenericDeviceName } from '@/lib/device-display'
 
 let cachedTransfers: FileTransfer[] = [];
 let cachedTransfersUserId: string | null = null;
+// Shared across every hook instance (DashboardHome, FileTransferPage, ...) so
+// several mounted components never fire duplicate list requests at once.
+let transfersFetchInFlight: Promise<FileTransfer[]> | null = null;
+// Uploads whose chunks all reached storage but whose finalize call was lost
+// (page reload, proxy error, server restart) are completed once per session.
+let interruptedUploadRecoveryUserId: string | null = null;
 const uploadSessionStorageKey = 'unilink_upload_sessions';
 const getCookieValue = (name: string) => {
   if (typeof document === 'undefined') return null;
@@ -28,13 +34,139 @@ export interface FileTransfer extends Record<string, unknown> {
   encrypted_metadata?: any;
   created_at: string;
   completed_at?: string;
+  // camelCase aliases exposed by the API and used by some dashboard widgets.
+  fileName?: string;
+  fileSize?: number;
+  fileType?: string;
+  transferStatus?: FileTransfer['transfer_status'];
+  transferMethod?: FileTransfer['transfer_method'];
+  createdAt?: string;
+  completedAt?: string;
+  senderDeviceId?: string;
+  receiverDeviceId?: string;
 }
+
+// The API stores/returns camelCase records while older UI code expects
+// snake_case. Normalize to both shapes once so status, size, and name checks
+// behave identically everywhere.
+const normalizeTransferRecord = (transfer: Record<string, unknown>): FileTransfer => {
+  const fileName = String(transfer.file_name ?? transfer.fileName ?? 'file');
+  const fileSize = Number(transfer.file_size ?? transfer.fileSize ?? 0);
+  const fileType = String(transfer.file_type ?? transfer.fileType ?? 'application/octet-stream');
+  const transferStatus = String(
+    transfer.transfer_status ?? transfer.transferStatus ?? 'pending',
+  ) as FileTransfer['transfer_status'];
+  const transferMethod = String(
+    transfer.transfer_method ?? transfer.transferMethod ?? 'cloud',
+  ) as FileTransfer['transfer_method'];
+  const createdAt = String(transfer.created_at ?? transfer.createdAt ?? new Date().toISOString());
+  const senderDeviceId = String(transfer.sender_device_id ?? transfer.senderDeviceId ?? '');
+  const receiverValue = transfer.receiver_device_id ?? transfer.receiverDeviceId;
+  const receiverDeviceId = receiverValue ? String(receiverValue) : undefined;
+  const completedValue = transfer.completed_at ?? transfer.completedAt;
+  const completedAt = completedValue ? String(completedValue) : undefined;
+
+  return {
+    ...(transfer as FileTransfer),
+    id: String(transfer.id ?? ''),
+    user_id: String(transfer.user_id ?? transfer.userId ?? ''),
+    sender_device_id: senderDeviceId,
+    receiver_device_id: receiverDeviceId,
+    file_name: fileName,
+    file_size: fileSize,
+    file_type: fileType,
+    file_hash: transfer.file_hash ? String(transfer.file_hash) : undefined,
+    transfer_status: transferStatus,
+    transfer_method: transferMethod,
+    created_at: createdAt,
+    completed_at: completedAt,
+    fileName,
+    fileSize,
+    fileType,
+    transferStatus,
+    transferMethod,
+    createdAt,
+    completedAt,
+    senderDeviceId,
+    receiverDeviceId,
+  };
+};
+
+const requestTransfers = async () => {
+  if (transfersFetchInFlight) {
+    return transfersFetchInFlight;
+  }
+
+  transfersFetchInFlight = apiFetch<FileTransfer[]>('/api/file-transfers')
+    .then((data) => (data || []).map((entry) => normalizeTransferRecord(entry as Record<string, unknown>)))
+    .finally(() => {
+      transfersFetchInFlight = null;
+    });
+
+  return transfersFetchInFlight;
+};
+
+// Access tokens live for 30 minutes by default. A large upload can easily run
+// longer, so refresh shortly before expiry (and share one refresh across all
+// in-flight chunks) instead of letting every chunk start returning 401.
+const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+let tokenRefreshInFlight: Promise<string> | null = null;
+
+const getJwtExpiryMs = (token: string) => {
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) return 0;
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
+    const parsed = JSON.parse(atob(padded)) as { exp?: unknown };
+    return typeof parsed.exp === 'number' ? parsed.exp * 1000 : 0;
+  } catch {
+    return 0;
+  }
+};
+
+const refreshAuthToken = (fallbackToken: string) => {
+  if (tokenRefreshInFlight) {
+    return tokenRefreshInFlight;
+  }
+
+  tokenRefreshInFlight = apiFetch<{ token?: string }>('/api/auth/refresh', {
+    method: 'POST',
+    body: JSON.stringify({ rememberMe: localStorage.getItem('remember-me') === 'true' }),
+  })
+    .then((data) => {
+      const nextToken = typeof data?.token === 'string' ? data.token : '';
+      if (!nextToken) return fallbackToken;
+      localStorage.setItem('auth_token', nextToken);
+      return nextToken;
+    })
+    .catch(() => fallbackToken)
+    .finally(() => {
+      tokenRefreshInFlight = null;
+    });
+
+  return tokenRefreshInFlight;
+};
+
+const ensureFreshAuthToken = async (token: string, force = false) => {
+  if (!token) return token;
+  const expiresAt = getJwtExpiryMs(token);
+  if (!expiresAt) return token;
+  if (!force && expiresAt - Date.now() > TOKEN_REFRESH_MARGIN_MS) {
+    return token;
+  }
+  return refreshAuthToken(token);
+};
 
 export const useFileTransfer = () => {
   const [transfers, setTransfers] = useState<FileTransfer[]>(cachedTransfers);
   const [loading, setLoading] = useState(() => !cachedTransfers.length);
   const [uploadProgress, setUploadProgress] = useState<{ [key: string]: number }>({});
   const activeUploadControllers = useRef<Record<string, Set<XMLHttpRequest>>>({});
+  // Tracks uploads that are active in this tab, keyed by the id currently shown
+  // in the list. The list poll uses this instead of render state so an
+  // in-flight transfer is never dropped between server refreshes.
+  const activeUploadIds = useRef<Record<string, boolean>>({});
   const uploadSessionIds = useRef<Record<string, string>>({});
   const uploadFingerprints = useRef<Record<string, string>>({});
   const uploadDisplayNames = useRef<Record<string, string>>({});
@@ -42,7 +174,9 @@ export const useFileTransfer = () => {
   // Route medium and large files through the resumable chunk path so uploads
   // stay responsive on hosted environments instead of waiting on one big relay.
   const chunkSizeThreshold = 32 * 1024 * 1024;
-  const chunkUploadConcurrency = 4;
+  // Browsers open ~6 parallel connections per host; saturating them keeps large
+  // uploads at full bandwidth while each 8 MB chunk stays cheap to retry.
+  const chunkUploadConcurrency = 6;
   const chunkRetryLimit = 5;
   const chunkRequestTimeoutMs = 10 * 60 * 1000;
   const chunkRetryBaseDelayMs = 1_000;
@@ -192,10 +326,30 @@ export const useFileTransfer = () => {
         ? {
             ...transfer,
             transfer_status: status,
+            transferStatus: status,
           }
         : transfer,
     );
     setTransfers(cachedTransfers);
+  };
+
+  // Persist a terminal status on the server. Without this, a failed chunk
+  // upload only existed in this tab's memory: the next 4 s list poll replaced
+  // it with the server's "in_progress" record and the transfer appeared stuck
+  // forever. Local-only placeholder ids ("upload-...") are ignored.
+  const syncTransferStatus = async (
+    transferId: string,
+    status: FileTransfer['transfer_status'],
+  ) => {
+    if (!transferId || transferId.startsWith('upload-')) return;
+    try {
+      await apiFetch(`/api/file-transfers/${transferId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ transfer_status: status }),
+      });
+    } catch {
+      // Best effort: the next list refresh still shows the server's view.
+    }
   };
 
   const clearUploadProgress = (uploadId: string) => {
@@ -223,9 +377,19 @@ export const useFileTransfer = () => {
       delete activeUploadControllers.current[fromId];
     }
 
+    if (activeUploadIds.current[fromId]) {
+      activeUploadIds.current[toId] = true;
+      delete activeUploadIds.current[fromId];
+    }
+
     if (uploadSessionIds.current[fromId]) {
       uploadSessionIds.current[toId] = uploadSessionIds.current[fromId];
       delete uploadSessionIds.current[fromId];
+    }
+
+    if (uploadFingerprints.current[fromId]) {
+      uploadFingerprints.current[toId] = uploadFingerprints.current[fromId];
+      delete uploadFingerprints.current[fromId];
     }
 
     if (uploadDisplayNames.current[fromId]) {
@@ -245,18 +409,19 @@ export const useFileTransfer = () => {
     senderDeviceId: string,
     receiverDeviceId?: string,
     transferMethod: 'cloud' | 'p2p' | 'local' = 'cloud'
-  ): FileTransfer => ({
-    id: uploadId,
-    user_id: user?.id || '',
-    sender_device_id: senderDeviceId,
-    receiver_device_id: receiverDeviceId,
-    file_name: file.name,
-    file_size: file.size,
-    file_type: file.type || 'application/octet-stream',
-    transfer_status: 'in_progress',
-    transfer_method: transferMethod,
-    created_at: new Date().toISOString(),
-  });
+  ): FileTransfer =>
+    normalizeTransferRecord({
+      id: uploadId,
+      user_id: user?.id || '',
+      sender_device_id: senderDeviceId,
+      receiver_device_id: receiverDeviceId,
+      file_name: file.name,
+      file_size: file.size,
+      file_type: file.type || 'application/octet-stream',
+      transfer_status: 'in_progress',
+      transfer_method: transferMethod,
+      created_at: new Date().toISOString(),
+    });
 
   const updateUploadProgress = (
     uploadId: string,
@@ -291,6 +456,10 @@ export const useFileTransfer = () => {
     }, 0);
     const activeChunkProgress: Record<number, number> = {};
     updateUploadProgress(uploadId, file.size, completedChunkBytes, activeChunkProgress);
+    // Keep the access token fresh for the whole upload. A large file can take
+    // longer than the token lifetime; refreshing here (shared across parallel
+    // chunks) prevents every remaining chunk from failing with 401.
+    let activeAuthToken = authToken;
 
     const missingChunkIndices = Array.from({ length: totalChunks }, (_, index) => index).filter(
       (index) => !uploadedChunkSet.has(index),
@@ -303,7 +472,13 @@ export const useFileTransfer = () => {
       const end = Math.min(file.size, start + chunkSize);
       const chunk = file.slice(start, end);
 
+      let authRetryAfterRefresh = false;
       for (let attempt = 0; attempt < chunkRetryLimit; attempt += 1) {
+        if (uploadFailed) return;
+
+        activeAuthToken = await ensureFreshAuthToken(
+          localStorage.getItem('auth_token') || activeAuthToken,
+        );
         if (uploadFailed) return;
 
         let xhr: XMLHttpRequest | null = null;
@@ -314,7 +489,7 @@ export const useFileTransfer = () => {
             xhr.withCredentials = true;
             xhr.open('POST', getApiUrl('/api/file-transfers/chunk', apiBaseUrl));
             xhr.timeout = chunkRequestTimeoutMs;
-            xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
+            xhr.setRequestHeader('Authorization', `Bearer ${activeAuthToken}`);
             if (csrfToken) {
               xhr.setRequestHeader('X-CSRF-Token', csrfToken);
             }
@@ -365,6 +540,14 @@ export const useFileTransfer = () => {
         } catch (error) {
           const cancelled = error instanceof Error && /cancelled/i.test(error.message);
           const isFinalAttempt = attempt === chunkRetryLimit - 1;
+          const authFailure = error instanceof ApiError && error.status === 401;
+          if (authFailure && !authRetryAfterRefresh && !isFinalAttempt && !cancelled) {
+            // Token rotated between the proactive check and the request (or the
+            // server rejected an old one): get a new token and retry at once.
+            authRetryAfterRefresh = true;
+            activeAuthToken = await ensureFreshAuthToken(activeAuthToken, true);
+            continue;
+          }
           if (cancelled || isFinalAttempt) {
             uploadFailed = true;
             activeUploadControllers.current[uploadId]?.forEach((controller) => {
@@ -418,7 +601,9 @@ export const useFileTransfer = () => {
     for (let attempt = 0; attempt < processingPollLimit; attempt += 1) {
       await new Promise((resolve) => window.setTimeout(resolve, processingPollIntervalMs));
       try {
-        const latestTransfers = await apiFetch<FileTransfer[]>('/api/file-transfers');
+        const latestTransfers = (await apiFetch<FileTransfer[]>('/api/file-transfers') || []).map((entry) =>
+          normalizeTransferRecord(entry as Record<string, unknown>),
+        );
         cachedTransfers = latestTransfers || [];
         if (user) {
           cachedTransfersUserId = user.id;
@@ -426,8 +611,15 @@ export const useFileTransfer = () => {
         setTransfers(cachedTransfers);
 
         const completedTransfer = latestTransfers.find((entry) => entry.id === transferId);
-        if (completedTransfer && getTransferFieldValue(completedTransfer, 'transfer_status', 'transferStatus') === 'completed') {
-          return completedTransfer;
+        if (completedTransfer) {
+          const status = getTransferFieldValue(completedTransfer, 'transfer_status', 'transferStatus');
+          if (status === 'completed') {
+            return completedTransfer;
+          }
+          // Do not keep polling for five minutes after a definitive failure.
+          if (status === 'failed' || status === 'cancelled') {
+            return null;
+          }
         }
       } catch {
         // Ignore polling errors; the next poll or background refresh can recover.
@@ -437,7 +629,19 @@ export const useFileTransfer = () => {
     return null;
   };
 
-  const recoverCompletedUpload = async (uploadId: string, sessionUploadId: string) => {
+  const recoverCompletedUpload = async (transferId: string, sessionUploadId: string) => {
+    const readLatestTransfer = async (id: string) => {
+      const latestTransfers = ((await apiFetch<FileTransfer[]>('/api/file-transfers')) || []).map((entry) =>
+        normalizeTransferRecord(entry as Record<string, unknown>),
+      );
+      cachedTransfers = latestTransfers;
+      if (user) {
+        cachedTransfersUserId = user.id;
+      }
+      setTransfers(cachedTransfers);
+      return latestTransfers.find((entry) => entry.id === id);
+    };
+
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
         const uploadStatus = await apiFetch<{
@@ -449,33 +653,53 @@ export const useFileTransfer = () => {
           processing: boolean;
           transferStatus: FileTransfer['transfer_status'];
         }>(`/api/file-transfers/upload-status/${sessionUploadId}`);
+        const resolvedTransferId = uploadStatus.transferId || transferId;
 
         if (uploadStatus.transferStatus === 'completed') {
-          const completedTransfer = await pollCompletedTransfer(uploadStatus.transferId);
-          if (completedTransfer) {
-            return completedTransfer;
-          }
-
-          const latestTransfers = await apiFetch<FileTransfer[]>('/api/file-transfers');
-          const completedEntry = latestTransfers.find((entry) => entry.id === uploadStatus.transferId);
-          if (completedEntry && getTransferFieldValue(completedEntry, 'transfer_status', 'transferStatus') === 'completed') {
-            cachedTransfers = latestTransfers;
-            if (user) {
-              cachedTransfersUserId = user.id;
-            }
-            setTransfers(cachedTransfers);
+          const completedEntry = await readLatestTransfer(resolvedTransferId);
+          if (completedEntry && completedEntry.transfer_status === 'completed') {
             return completedEntry;
           }
         }
 
-        if (uploadStatus.processing || uploadStatus.uploadedChunks.length === uploadStatus.totalChunks) {
-          const completedTransfer = await pollCompletedTransfer(uploadStatus.transferId);
+        const allChunksUploaded =
+          !uploadStatus.processing &&
+          uploadStatus.uploadedChunks.length === uploadStatus.totalChunks &&
+          uploadStatus.totalChunks > 0;
+
+        if (allChunksUploaded) {
+          // A previous completion call may have been lost (page reload, proxy
+          // timeout, server restart). The bytes are all in storage, so asking
+          // again is safe and lets the server finalize without re-uploading.
+          try {
+            const completionResponse = await apiFetch<
+              FileTransfer | { transferId: string; processing: boolean }
+            >('/api/file-transfers/complete-upload', {
+              method: 'POST',
+              body: JSON.stringify({ uploadId: uploadStatus.uploadId }),
+            });
+            if (completionResponse && !('processing' in completionResponse)) {
+              const completedTransfer = normalizeTransferRecord(
+                completionResponse as Record<string, unknown>,
+              );
+              if (completedTransfer.transfer_status === 'completed') {
+                return completedTransfer;
+              }
+            }
+          } catch {
+            // Fall through to polling; the server may already be finalizing.
+          }
+        }
+
+        if (uploadStatus.processing || allChunksUploaded) {
+          const completedTransfer = await pollCompletedTransfer(resolvedTransferId);
           if (completedTransfer) {
             return completedTransfer;
           }
         }
       } catch {
-        // Keep trying a few times. A temporary fetch failure should not turn a finished upload into a cancelled one.
+        // The status endpoint 404s once finalize has removed the session, so a
+        // completed transfer must still be recoverable from the list below.
       }
 
       if (attempt < 3) {
@@ -483,7 +707,98 @@ export const useFileTransfer = () => {
       }
     }
 
+    // Final fallback: the session may already be gone but the transfer record
+    // is the source of truth.
+    try {
+      const latestEntry = await readLatestTransfer(transferId);
+      if (latestEntry && latestEntry.transfer_status === 'completed') {
+        return latestEntry;
+      }
+    } catch {
+      // Ignore; the periodic dashboard poll will pick up the final state.
+    }
+
     return null;
+  };
+
+  // Shared by every background-finalize path: wait for the server, then put
+  // the finished transfer into the list and surface the success toast. If the
+  // upload definitively failed, refresh so the UI shows "failed" instead of
+  // leaving a stale "in_progress" row behind.
+  const finalizeUploadInBackground = (
+    transferId: string,
+    sessionUploadId: string,
+    fileName: string,
+  ) => {
+    void recoverCompletedUpload(transferId, sessionUploadId)
+      .then((completedTransfer) => {
+        if (!completedTransfer) {
+          void fetchTransfers();
+          return;
+        }
+        cachedTransfers = [
+          completedTransfer,
+          ...cachedTransfers.filter((transfer) => transfer.id !== completedTransfer.id),
+        ];
+        if (user) {
+          cachedTransfersUserId = user.id;
+        }
+        setTransfers(cachedTransfers);
+        clearUploadTracking(transferId);
+        clearUploadProgress(transferId);
+        void fetchTransfers();
+        toast.success(`File transfer completed: ${fileName}`);
+      })
+      .catch(() => {
+        void fetchTransfers();
+      });
+  };
+
+  // On dashboard load, finish chunked uploads whose bytes all reached storage
+  // but whose complete-upload call never ran (for example the tab was closed
+  // after the last chunk). This never touches an upload that is still missing
+  // chunks, so it cannot interfere with another device that is sending now.
+  const recoverInterruptedUploads = async (transferList: FileTransfer[]) => {
+    if (!user || interruptedUploadRecoveryUserId === user.id) return;
+    interruptedUploadRecoveryUserId = user.id;
+    const candidates = transferList
+      .filter((transfer) => transfer.transfer_status === 'in_progress')
+      .filter((transfer) => typeof transfer.uploadSessionId === 'string' && transfer.uploadSessionId)
+      .slice(0, 5);
+    let completedAny = false;
+
+    for (const transfer of candidates) {
+      try {
+        const uploadStatus = await apiFetch<{
+          uploadId: string;
+          transferId: string;
+          totalChunks: number;
+          uploadedChunks: number[];
+          processing: boolean;
+          transferStatus: FileTransfer['transfer_status'];
+        }>(`/api/file-transfers/upload-status/${transfer.uploadSessionId as string}`);
+        if (
+          uploadStatus.transferStatus !== 'in_progress' ||
+          uploadStatus.processing ||
+          uploadStatus.uploadedChunks.length !== uploadStatus.totalChunks
+        ) {
+          continue;
+        }
+        await apiFetch('/api/file-transfers/complete-upload', {
+          method: 'POST',
+          body: JSON.stringify({ uploadId: uploadStatus.uploadId }),
+        });
+        completedAny = true;
+      } catch {
+        // Session already gone or temporarily unavailable; the normal list
+        // poll and stale-upload cleanup will settle the final state.
+      }
+    }
+
+    if (completedAny) {
+      await sleep(750);
+      await fetchTransfers();
+    }
   };
 
   const getStoredCurrentDevice = () => {
@@ -515,12 +830,11 @@ export const useFileTransfer = () => {
     if (!token) return;
 
     try {
-      const data = await apiFetch<FileTransfer[]>('/api/file-transfers');
-      const serverTransfers = data || [];
+      const serverTransfers = await requestTransfers();
       const localUploads = cachedTransfers.filter(
         (transfer) =>
           transfer.transfer_status === 'in_progress' &&
-          uploadProgress[transfer.id] !== undefined &&
+          Boolean(activeUploadIds.current[transfer.id]) &&
           !serverTransfers.some((serverTransfer) => serverTransfer.id === transfer.id),
       );
       cachedTransfers = [...localUploads, ...serverTransfers];
@@ -547,11 +861,18 @@ export const useFileTransfer = () => {
       return;
     }
 
-    const token = localStorage.getItem('auth_token');
+    let token = localStorage.getItem('auth_token');
     if (!token) return;
+    token = await ensureFreshAuthToken(token);
     let uploadId = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     uploadDisplayNames.current[uploadId] = file.name;
+    activeUploadIds.current[uploadId] = true;
     const apiBaseUrl = await resolveApiBaseUrl();
+    // Once every chunk has been accepted, the transfer is recoverable even if
+    // the final completion request is lost. Before that point a failure means
+    // the upload really is incomplete and must be reported to the server.
+    let allChunksUploaded = false;
+    let recoverySessionUploadId = '';
 
     try {
       const currentDeviceId = await ensureCurrentDeviceId();
@@ -623,6 +944,8 @@ export const useFileTransfer = () => {
         uploadId = init.transferId;
         uploadSessionIds.current[uploadId] = sessionUploadId;
         await uploadLargeFileInChunks(uploadId, sessionUploadId, init.chunkSize, init.totalChunks, file, token, apiBaseUrl, init.uploadedChunks || []);
+        allChunksUploaded = true;
+        recoverySessionUploadId = sessionUploadId;
 
         setUploadProgress((current) => ({
           ...current,
@@ -642,48 +965,24 @@ export const useFileTransfer = () => {
         if (completionResponse && 'processing' in completionResponse && completionResponse.processing) {
           clearUploadProgress(uploadId);
           void fetchTransfers();
-          data = {
+          data = normalizeTransferRecord({
             ...pendingTransfer,
             id: uploadId,
             transfer_status: 'in_progress',
-          };
-          toast.info(`${file.name} is finalizing in the background.`);
-          void recoverCompletedUpload(uploadId, sessionUploadId).then((backgroundCompletedTransfer) => {
-            if (!backgroundCompletedTransfer) return;
-            cachedTransfers = [
-              backgroundCompletedTransfer,
-              ...cachedTransfers.filter((transfer) => transfer.id !== backgroundCompletedTransfer.id),
-            ];
-            cachedTransfersUserId = user.id;
-            setTransfers(cachedTransfers);
-            clearUploadTracking(uploadId);
-            clearUploadProgress(uploadId);
-            void fetchTransfers();
-            toast.success(`File transfer completed: ${file.name}`);
           });
+          toast.info(`${file.name} is finalizing in the background.`);
+          finalizeUploadInBackground(uploadId, sessionUploadId, file.name);
         } else if (completionResponse) {
-          data = completionResponse as FileTransfer;
+          data = normalizeTransferRecord(completionResponse as Record<string, unknown>);
         } else {
           clearUploadProgress(uploadId);
-          data = {
+          data = normalizeTransferRecord({
             ...pendingTransfer,
             id: uploadId,
             transfer_status: 'in_progress',
-          };
-          toast.info(`${file.name} finished sending and is syncing in the background.`);
-          void recoverCompletedUpload(uploadId, sessionUploadId).then((backgroundCompletedTransfer) => {
-            if (!backgroundCompletedTransfer) return;
-            cachedTransfers = [
-              backgroundCompletedTransfer,
-              ...cachedTransfers.filter((transfer) => transfer.id !== backgroundCompletedTransfer.id),
-            ];
-            cachedTransfersUserId = user.id;
-            setTransfers(cachedTransfers);
-            clearUploadTracking(uploadId);
-            clearUploadProgress(uploadId);
-            void fetchTransfers();
-            toast.success(`File transfer completed: ${file.name}`);
           });
+          toast.info(`${file.name} finished sending and is syncing in the background.`);
+          finalizeUploadInBackground(uploadId, sessionUploadId, file.name);
         }
         if (data.transfer_status !== 'in_progress') {
           removeStoredUploadSession(uploadId);
@@ -696,6 +995,7 @@ export const useFileTransfer = () => {
           xhr.withCredentials = true;
           xhr.open('POST', getApiUrl('/api/file-transfers/upload', apiBaseUrl));
           xhr.responseType = 'json';
+          xhr.timeout = chunkRequestTimeoutMs;
           xhr.setRequestHeader('Authorization', `Bearer ${token}`);
           if (csrfToken) {
             xhr.setRequestHeader('X-CSRF-Token', csrfToken);
@@ -722,7 +1022,7 @@ export const useFileTransfer = () => {
           xhr.onload = () => {
             if (xhr.status >= 200 && xhr.status < 300) {
               const response = xhr.response as FileTransfer;
-              resolve(response);
+              resolve(normalizeTransferRecord(response as Record<string, unknown>));
               return;
             }
 
@@ -747,6 +1047,10 @@ export const useFileTransfer = () => {
 
           xhr.onerror = () => {
             reject(new Error('Upload failed. Check your connection or deployment API settings.'));
+          };
+
+          xhr.ontimeout = () => {
+            reject(new Error('Upload timed out. Please check your connection and try again.'));
           };
 
           xhr.onabort = () => {
@@ -783,16 +1087,20 @@ export const useFileTransfer = () => {
     } catch (err) {
       console.error('Start transfer error:', err);
       const cancelled = err instanceof Error && /(cancelled|canceled|aborted)/i.test(err.message);
-      const recoverableCompletionFailure =
-        err instanceof Error && /(failed to fetch|networkerror|network error|fetch failed)/i.test(err.message);
       if (cancelled) {
         markTransferStatus(uploadId, 'cancelled');
         clearUploadTracking(uploadId);
-      } else if (recoverableCompletionFailure) {
+      } else if (allChunksUploaded && recoverySessionUploadId) {
+        // Every byte is already in storage. A failed finalize call (proxy
+        // timeout, 502, dropped connection) is recoverable, so retry it in the
+        // background instead of leaving the server row "in_progress" forever.
         markTransferStatus(uploadId, 'in_progress');
         void fetchTransfers();
+        finalizeUploadInBackground(uploadId, recoverySessionUploadId, file.name);
       } else {
         markTransferStatus(uploadId, 'failed');
+        void syncTransferStatus(uploadId, 'failed');
+        clearUploadTracking(uploadId);
       }
       const message = cancelled
         ? `${file.name} transfer cancelled`
@@ -803,12 +1111,13 @@ export const useFileTransfer = () => {
             : 'Failed to start file transfer';
       if (cancelled) {
         toast.info(message);
-      } else if (recoverableCompletionFailure) {
+      } else if (allChunksUploaded) {
         toast.info(`${file.name} uploaded, and we're finishing the sync in the background.`);
       } else {
         toast.error(message);
       }
     } finally {
+      delete activeUploadIds.current[uploadId];
       clearUploadProgress(uploadId);
       setLoading(false);
     }
@@ -823,6 +1132,7 @@ export const useFileTransfer = () => {
 
     markTransferStatus(transferId, 'cancelled');
     clearUploadProgress(transferId);
+    delete activeUploadIds.current[transferId];
     xhrSet.forEach((xhr) => xhr.abort());
     unregisterActiveUpload(transferId);
     const sessionUploadId = uploadSessionIds.current[transferId];
@@ -869,6 +1179,7 @@ export const useFileTransfer = () => {
     try {
       cachedTransfers = nextTransfers;
       setTransfers(nextTransfers);
+      delete activeUploadIds.current[transferId];
       clearUploadTracking(transferId);
       unregisterActiveUpload(transferId);
 
@@ -937,6 +1248,7 @@ export const useFileTransfer = () => {
     const bootstrapTransfers = async () => {
       if (!user) {
         if (!active) return;
+        interruptedUploadRecoveryUserId = null;
         cachedTransfers = [];
         cachedTransfersUserId = null;
         setTransfers([]);
@@ -950,6 +1262,10 @@ export const useFileTransfer = () => {
       if (!active) return;
       cachedTransfersUserId = user.id;
       setLoading(false);
+      // Repair uploads left in "in_progress" by a closed tab or lost finalize
+      // request. Runs once per signed-in session and never touches uploads
+      // that are still missing chunks.
+      void recoverInterruptedUploads(cachedTransfers).catch(() => undefined);
     };
 
     bootstrapTransfers();
@@ -966,7 +1282,14 @@ export const useFileTransfer = () => {
       fetchTransfers().catch(() => undefined);
     };
 
-    const interval = window.setInterval(refreshTransfers, 1500);
+    // Polling exists so a file sent from another device appears here. 4 s is
+    // responsive without hammering the API/database (and it is shared between
+    // hook instances), and hidden tabs stop polling entirely.
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        refreshTransfers();
+      }
+    }, 4000);
     window.addEventListener('focus', refreshTransfers);
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
