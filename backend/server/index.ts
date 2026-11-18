@@ -30,8 +30,8 @@ const PRO_TOTAL_USER_STORAGE = 100 * 1024 * 1024 * 1024;
 const FREE_MAX_ACTIVE_UPLOADS = 1;
 const PRO_MAX_ACTIVE_UPLOADS = 10;
 const MAX_FILES_PER_SELECTION = 10;
-const FREE_FILE_SIZE_LIMIT = Math.max(100 * 1024 * 1024, MAX_SINGLE_FILE_SIZE);
-const PRO_FILE_SIZE_LIMIT = Math.max(10 * 1024 * 1024 * 1024, MAX_SINGLE_FILE_SIZE);
+const FREE_FILE_SIZE_LIMIT = 100 * 1024 * 1024;
+const PRO_FILE_SIZE_LIMIT = 10 * 1024 * 1024 * 1024;
 // Keep moderate uploads synchronous so the UI can finish the transfer in one
 // final response instead of lingering in a background processing state.
 const SYNC_COMPLETE_UPLOAD_LIMIT_BYTES = 256 * 1024 * 1024;
@@ -1896,6 +1896,7 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
     createdAt: nowIso(),
     updatedAt: nowIso(),
     uploadedChunks: new Set<number>(),
+    hasScannedStorage: true,
     isDirectUpload: false,
   };
 
@@ -2024,8 +2025,7 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
       ? session.fileSize - session.chunkSize * (session.totalChunks - 1)
       : session.chunkSize;
 
-  const existingChunkIndices = await getUploadedChunkIndices(session);
-  if (existingChunkIndices.includes(chunkIndex)) {
+  if (session.uploadedChunks.has(chunkIndex)) {
     session.updatedAt = nowIso();
     await persistChunkProgress(session, req.auth!.userId);
     res.status(200).json({
@@ -2639,11 +2639,22 @@ const streamChunkedTransferDownload = async (
 
   const downloadChunk = async (chunkIndex: number) => {
     const chunkPath = getChunkStoragePath(transfer.filePath!, chunkIndex);
-    const { data, error } = await supabase.storage.from(FILE_BUCKET).download(chunkPath);
-    if (error || !data) {
-      throw new Error(`Could not read stored chunk ${chunkIndex + 1}.`);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (clientDisconnected) throw new Error("Download closed");
+      try {
+        const { data, error } = await supabase.storage.from(FILE_BUCKET).download(chunkPath);
+        if (error || !data) throw new Error("Storage read failed");
+        const buffer = Buffer.from(await data.arrayBuffer());
+        const expected = Math.min(chunkSize, transfer.fileSize - chunkIndex * chunkSize);
+        if (buffer.length !== expected) throw new Error("Incomplete stored chunk");
+        return buffer;
+      } catch (error) {
+        if (attempt === 2) throw error;
+        await new Promise(resolve => setTimeout(resolve, 250 * 2 ** attempt));
+      }
     }
-    return Buffer.from(await data.arrayBuffer());
+    throw new Error("Chunk download failed");
+
   };
 
   const scheduleNextChunks = () => {

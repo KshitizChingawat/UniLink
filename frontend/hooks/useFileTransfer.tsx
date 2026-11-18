@@ -431,10 +431,8 @@ export const useFileTransfer = () => {
   ) => {
     const activeBytes = Object.values(activeChunkProgress).reduce((sum, value) => sum + value, 0);
     const percent = Math.min(98, Math.round(((completedChunkBytes + activeBytes) / fileSize) * 100));
-    setUploadProgress((current) => ({
-      ...current,
-      [uploadId]: percent,
-    }));
+    setUploadProgress(current => current[uploadId] === percent ? current : { ...current, [uploadId]: percent });
+
   };
 
   const uploadLargeFileInChunks = async (
@@ -912,7 +910,8 @@ export const useFileTransfer = () => {
             }>(`/api/file-transfers/upload-status/${sessionUploadId}`);
             rekeyUploadTracking(uploadId, init.transferId);
             uploadId = init.transferId;
-          } catch {
+          } catch (error) {
+            if (!(error instanceof ApiError) || error.status !== 404) throw error;
             sessionUploadId = '';
           }
         }
@@ -936,8 +935,7 @@ export const useFileTransfer = () => {
             }),
           });
           sessionUploadId = init.uploadId;
-          storedSessions[fileFingerprint] = sessionUploadId;
-          setUploadSessionMap(storedSessions);
+          setUploadSessionMap({ ...getUploadSessionMap(), [fileFingerprint]: sessionUploadId });
         }
 
         rekeyUploadTracking(uploadId, init.transferId);
@@ -1097,6 +1095,8 @@ export const useFileTransfer = () => {
         markTransferStatus(uploadId, 'in_progress');
         void fetchTransfers();
         finalizeUploadInBackground(uploadId, recoverySessionUploadId, file.name);
+      } else if (uploadSessionIds.current[uploadId]) {
+        markTransferStatus(uploadId, 'in_progress');
       } else {
         markTransferStatus(uploadId, 'failed');
         void syncTransferStatus(uploadId, 'failed');
@@ -1114,7 +1114,7 @@ export const useFileTransfer = () => {
       } else if (allChunksUploaded) {
         toast.info(`${file.name} uploaded, and we're finishing the sync in the background.`);
       } else {
-        toast.error(message);
+        toast.error(uploadSessionIds.current[uploadId] ? message + " Select the same file and destination to resume." : message);
       }
     } finally {
       delete activeUploadIds.current[uploadId];
