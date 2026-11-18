@@ -1,325 +1,141 @@
-import React, { useRef, useEffect } from "react";
-import * as THREE from "three";
-import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
-import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
-import { FXAAShader } from 'three/examples/jsm/shaders/FXAAShader.js';
+import { useEffect, useRef } from "react";
+import type { WebGLRenderer } from "three";
 
-// --- CONFIGURATION OBJECT V4.0 ---
-// Enhanced for a more dramatic, cool visual effect
-const config = {
-    particles: {
-        count: 65000, // Increased particle count for denser effect
-        size: 0.016,
-        boxSize: 8,  // Larger volume
-    },
-    colors: {
-        baseHue: 200,
-        hueVariance: 60,  // Wider color range (cyan, blue, purple, magenta)
-        saturation: 0.95,
-        lightness: 0.65,
-    },
-    simulation: {
-        noiseSpeed: 0.07,
-        noiseScale: 1.1,
-        mouseRepulsion: 0.008,
-        friction: 0.93,
-        // Swirling clusters
-        swirlStrength: 0.012,
-    },
-    bloom: {
-        strength: 1.8,  // Stronger glow
-        radius: 0.8,    // Wider bloom spread
-        threshold: 0.05, // Lower threshold for more glow
-    },
-    camera: {
-        initialDistance: 6,
-        parallaxIntensity: 0.008,
-        fov: 55,
-    },
-    // Color palette for gradient effect
-    palette: {
-        primary: 0x06b6d4,   // Cyan
-        secondary: 0x8b5cf6, // Purple
-        accent: 0xec4899,    // Pink/Magenta
-    },
-};
+// Both layers share a star field. Nearby grains have wider halos and drift
+// further with the pointer, while the distant stars anchor the nebula.
+const vertexShader = `
+  attribute float seed;
+  attribute vec3 tint;
+  uniform float time;
+  uniform float pixelRatio;
+  uniform vec2 pointer;
+  varying vec3 starColor;
+  varying float intensity;
+  void main() {
+    vec3 p = position;
+    float depth = (p.z + 4.0) / 8.0;
+    p.y += 0.10 * sin(p.x * 0.8 + time * 0.14 + p.z);
+    p.x += 0.09 * cos(p.y + time * 0.09);
+    p.xy += pointer * depth * 0.12;
+    vec4 view = modelViewMatrix * vec4(p, 1.0);
+    gl_Position = projectionMatrix * view;
+    gl_PointSize = clamp((1.3 + 8.0 * pow(seed, 5.0)) * 5.0 / -view.z, 1.0, 11.0) * pixelRatio;
+    starColor = tint;
+    intensity = (0.52 + 0.28 * sin(seed * 239.0 + time * (0.45 + seed))) + 0.18 * depth;
+  }`;
+const fragmentShader = `
+  varying vec3 starColor;
+  varying float intensity;
+  void main() {
+    float radius = length(gl_PointCoord - 0.5) * 2.0;
+    float halo = exp(-4.0 * radius * radius) * (1.0 - smoothstep(0.72, 1.0, radius));
+    gl_FragColor = vec4(starColor, halo * intensity);
+  }`;
 
 export default function GenerativeArtSceneV3() {
-    const mountRef = useRef<HTMLDivElement>(null);
-    const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
-    const composerRef = useRef<EffectComposer | null>(null);
-    const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-    const mouseRef = useRef(new THREE.Vector2(0, 0));
-    const velocitiesRef = useRef<Float32Array | null>(null);
+  const mount = useRef<HTMLDivElement>(null);
 
-    useEffect(() => {
-        const currentMount = mountRef.current;
-        if (!currentMount) return;
+  useEffect(() => {
+    const host = mount.current;
+    if (!host) return;
+    let cancelled = false;
+    let dispose: (() => void) | undefined;
 
-        const scene = new THREE.Scene();
-        // Add nebula-like ambient lighting
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
-        scene.add(ambientLight);
-
-        const camera = new THREE.PerspectiveCamera(config.camera.fov, currentMount.clientWidth / currentMount.clientHeight, 0.1, 1000);
-        camera.position.z = config.camera.initialDistance;
-        cameraRef.current = camera;
-
-        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-        renderer.setClearColor(0x000000, 0);
-        renderer.setSize(currentMount.clientWidth, currentMount.clientHeight);
-        renderer.setPixelRatio(window.devicePixelRatio);
-        renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        renderer.outputColorSpace = THREE.SRGBColorSpace;
-        rendererRef.current = renderer;
-        currentMount.appendChild(renderer.domElement);
-
-        const renderPass = new RenderPass(scene, camera);
-
-        // Bloom pass for glow effect
-        const bloomPass = new UnrealBloomPass(new THREE.Vector2(currentMount.clientWidth, currentMount.clientHeight), config.bloom.strength, config.bloom.radius, config.bloom.threshold);
-        bloomPass.resolution = new THREE.Vector2(currentMount.clientWidth / 1.5, currentMount.clientHeight / 1.5);
-
-        // FXAA pass for anti-aliasing
-        const fxaaPass = new ShaderPass(FXAAShader);
-        fxaaPass.material.uniforms['resolution'].value.set(
-            1 / (currentMount.clientWidth * window.devicePixelRatio),
-            1 / (currentMount.clientHeight * window.devicePixelRatio)
-        );
-
-        const composer = new EffectComposer(renderer);
-        composer.addPass(renderPass);
-        composer.addPass(bloomPass);
-        composer.addPass(fxaaPass);
-        composerRef.current = composer;
-
-        const particleCount = config.particles.count;
-        const positions = new Float32Array(particleCount * 3);
-        const colors = new Float32Array(particleCount * 3);
-        const velocities = new Float32Array(particleCount * 3).fill(0);
-        velocitiesRef.current = velocities;
-        const baseColor = new THREE.Color();
-
-        for (let i = 0; i < particleCount; i++) {
-            const i3 = i * 3;
-            positions[i3] = (Math.random() - 0.5) * config.particles.boxSize;
-            positions[i3 + 1] = (Math.random() - 0.5) * config.particles.boxSize;
-            positions[i3 + 2] = (Math.random() - 0.5) * config.particles.boxSize;
-
-            const hue = (config.colors.baseHue + (Math.random() - 0.5) * config.colors.hueVariance) / 360;
-            baseColor.setHSL(hue, 1.0, 0.6);
-            colors[i3] = baseColor.r;
-            colors[i3 + 1] = baseColor.g;
-            colors[i3 + 2] = baseColor.b;
+    async function initialize(container: HTMLDivElement) {
+      const THREE = await import("three");
+      if (cancelled) return;
+      let renderer: WebGLRenderer;
+      try {
+        renderer = new THREE.WebGLRenderer({ alpha: true, antialias: false, powerPreference: "low-power" });
+      } catch {
+        return; // The static stardust beneath the canvas remains visible.
+      }
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 40);
+      camera.position.z = 7;
+      const count = container.clientWidth < 700 ? 5500 : 15500;
+      const positions = new Float32Array(count * 3);
+      const colors = new Float32Array(count * 3);
+      const seeds = new Float32Array(count);
+      const color = new THREE.Color();
+      for (let i = 0; i < count; i++) {
+        const x = (Math.random() - 0.5) * 30;
+        const z = (Math.random() - 0.5) * 8;
+        // Thread a denser diagonal current through the scattered dust.
+        const y = i % 3 === 0
+          ? 1.2 * Math.sin(x * 0.43 + z * 0.22) + x * 0.17 + (Math.random() - Math.random()) * 1.6
+          : (Math.random() - 0.5) * 14;
+        positions.set([x, y, z], i * 3);
+        seeds[i] = Math.random();
+        color.setHSL(0.52 + 0.20 * Math.random(), 0.68, 0.60 + seeds[i] * 0.31);
+        color.toArray(colors, i * 3);
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute("seed", new THREE.BufferAttribute(seeds, 1));
+      geometry.setAttribute("tint", new THREE.BufferAttribute(colors, 3));
+      const uniforms = { time: { value: 0 }, pixelRatio: { value: 1 }, pointer: { value: new THREE.Vector2() } };
+      const material = new THREE.ShaderMaterial({
+        uniforms, vertexShader, fragmentShader, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      });
+      scene.add(new THREE.Points(geometry, material));
+      container.appendChild(renderer.domElement);
+      const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
+      const target = new THREE.Vector2();
+      let frame = 0;
+      let previous = 0;
+      function draw(now: number) {
+        frame = 0;
+        if (document.hidden) return;
+        const delta = previous ? Math.min((now - previous) / 1000, 0.06) : 0;
+        previous = now;
+        if (!reduced.matches) {
+          uniforms.time.value += delta;
+          uniforms.pointer.value.lerp(target, 1 - Math.exp(-delta * 3));
         }
+        renderer.render(scene, camera);
+        if (!reduced.matches) frame = requestAnimationFrame(draw);
+      }
+      function refresh() {
+        cancelAnimationFrame(frame);
+        previous = 0;
+        draw(performance.now());
+      }
+      function resize() {
+        const width = container.clientWidth, height = container.clientHeight;
+        if (!width || !height) return;
+        camera.aspect = width / height;
+        camera.updateProjectionMatrix();
+        uniforms.pixelRatio.value = Math.min(window.devicePixelRatio, 1.5);
+        renderer.setPixelRatio(uniforms.pixelRatio.value);
+        renderer.setSize(width, height);
+        refresh();
+      }
+      function move(event: PointerEvent) {
+        if (event.pointerType === "mouse") target.set(event.clientX / innerWidth * 2 - 1, 1 - event.clientY / innerHeight * 2);
+      }
+      const observer = new ResizeObserver(resize);
+      observer.observe(container);
+      window.addEventListener("pointermove", move, { passive: true });
+      document.addEventListener("visibilitychange", refresh);
+      reduced.addEventListener("change", refresh);
+      resize();
+      dispose = () => {
+        observer.disconnect();
+        window.removeEventListener("pointermove", move);
+        document.removeEventListener("visibilitychange", refresh);
+        reduced.removeEventListener("change", refresh);
+        cancelAnimationFrame(frame);
+        geometry.dispose(); material.dispose(); renderer.dispose();
+        renderer.forceContextLoss(); renderer.domElement.remove();
+      };
+    }
+    void initialize(host).catch(() => { /* Keep the static field if the renderer cannot load. */ });
+    return () => { cancelled = true; dispose?.(); };
+  }, []);
 
-        const particleGeometry = new THREE.BufferGeometry();
-        particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        particleGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-        const particleMaterial = new THREE.ShaderMaterial({
-            uniforms: {
-                u_pointSize: { value: config.particles.size * renderer.getPixelRatio() }
-            },
-            vertexShader: `
-                attribute vec3 color;
-                varying vec3 vColor;
-                uniform float u_pointSize;
-
-                void main() {
-                    vColor = color;
-                    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-                    gl_PointSize = u_pointSize * (10.0 / -mvPosition.z);
-                    gl_Position = projectionMatrix * mvPosition;
-                }
-            `,
-            fragmentShader: `
-                varying vec3 vColor;
-                void main() {
-                    float strength = distance(gl_PointCoord, vec2(0.5));
-                    strength = 1.0 - step(0.5, strength);
-                    if (strength < 0.01) discard;
-                    gl_FragColor = vec4(vColor, strength);
-                }
-            `,
-            transparent: true,
-            blending: THREE.AdditiveBlending,
-            depthWrite: false,
-        });
-
-        const particleSystem = new THREE.Points(particleGeometry, particleMaterial);
-        scene.add(particleSystem);
-
-        // Add a secondary, smaller particle system for depth
-        const secondaryCount = 8000;
-        const secondaryPositions = new Float32Array(secondaryCount * 3);
-        const secondaryColors = new Float32Array(secondaryCount * 3);
-        const secondaryGeometry = new THREE.BufferGeometry();
-
-        const secondaryColor = new THREE.Color();
-        for (let i = 0; i < secondaryCount; i++) {
-            const i3 = i * 3;
-            // Distribute secondary particles in a sphere
-            const radius = config.particles.boxSize * 0.4 * Math.cbrt(Math.random());
-            const theta = Math.random() * Math.PI * 2;
-            const phi = Math.acos(2 * Math.random() - 1);
-            secondaryPositions[i3] = radius * Math.sin(phi) * Math.cos(theta);
-            secondaryPositions[i3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
-            secondaryPositions[i3 + 2] = radius * Math.cos(phi);
-
-            const hue = (config.colors.baseHue + (Math.random() - 0.5) * config.colors.hueVariance) / 360;
-            secondaryColor.setHSL(hue, config.colors.saturation, config.colors.lightness * 1.2);
-            secondaryColors[i3] = secondaryColor.r;
-            secondaryColors[i3 + 1] = secondaryColor.g;
-            secondaryColors[i3 + 2] = secondaryColor.b;
-        }
-        secondaryGeometry.setAttribute('position', new THREE.BufferAttribute(secondaryPositions, 3));
-        secondaryGeometry.setAttribute('color', new THREE.BufferAttribute(secondaryColors, 3));
-
-        const secondaryMaterial = new THREE.ShaderMaterial({
-            uniforms: {
-                u_time: { value: 0 },
-                u_pointSize: { value: config.particles.size * 3.2 * renderer.getPixelRatio() },
-            },
-            vertexShader: `
-                attribute vec3 color;
-                varying vec3 vColor;
-                uniform float u_pointSize;
-                uniform float u_time;
-                void main() {
-                    vColor = color;
-                    float wave = sin(u_time * 0.5 + position.x * 0.5) * 0.1;
-                    vec3 rotatedPosition = position;
-                    rotatedPosition.x += wave;
-                    vec4 mvPosition = modelViewMatrix * vec4(rotatedPosition, 1.0);
-                    gl_PointSize = u_pointSize * (1.0 / -mvPosition.z);
-                    gl_Position = projectionMatrix * mvPosition;
-                }
-            `,
-            fragmentShader: `
-                varying vec3 vColor;
-                void main() {
-                    float strength = distance(gl_PointCoord, vec2(0.5));
-                    strength = exp(-strength * 2.5);
-                    if (strength < 0.001) discard;
-                    gl_FragColor = vec4(vColor, strength * 0.6);
-                }
-            `,
-            transparent: true,
-            blending: THREE.AdditiveBlending,
-            depthWrite: false,
-        });
-
-        const secondaryParticles = new THREE.Points(secondaryGeometry, secondaryMaterial);
-        scene.add(secondaryParticles);
-
-        // Curl noise simulation function
-        const curlNoiseFn = (p: THREE.Vector3, speed: number, scale: number) => {
-            const noiseVec = new THREE.Vector3(
-                Math.sin(p.y * scale + speed),
-                Math.cos(p.z * scale + speed),
-                Math.sin(p.x * scale + speed)
-            ).normalize();
-            return noiseVec;
-        };
-
-        let frameId: number;
-        const clock = new THREE.Clock();
-
-        const animate = () => {
-            const elapsedTime = clock.getElapsedTime();
-            const positionsAttr = particleSystem.geometry.attributes.position.array as Float32Array;
-            const velocitiesArr = velocitiesRef.current;
-            if (!velocitiesArr) return;
-
-            // Update secondary particles
-            secondaryMaterial.uniforms.u_time.value = elapsedTime;
-            secondaryParticles.rotation.y = elapsedTime * 0.03;
-            secondaryParticles.rotation.z = elapsedTime * 0.015;
-
-            // Rotate the entire particle system slightly for dynamism
-            particleSystem.rotation.y = elapsedTime * 0.005;
-            particleSystem.rotation.x = Math.sin(elapsedTime * 0.1) * 0.02;
-
-            for (let i = 0; i < particleCount; i++) {
-                const i3 = i * 3;
-                const p = new THREE.Vector3(positionsAttr[i3], positionsAttr[i3 + 1], positionsAttr[i3 + 2]);
-
-                const curlForce = curlNoiseFn(p, elapsedTime * config.simulation.noiseSpeed, config.simulation.noiseScale);
-
-                const mouseForce = new THREE.Vector3();
-                const mouseTarget = new THREE.Vector3(mouseRef.current.x * (config.particles.boxSize / 2), mouseRef.current.y * (config.particles.boxSize / 2), 0);
-                const distanceToMouse = p.distanceTo(mouseTarget);
-                if (distanceToMouse < 2) {
-                    mouseForce.subVectors(p, mouseTarget).normalize().multiplyScalar(1 / (distanceToMouse + 0.1));
-                }
-
-                velocitiesArr[i3] += (curlForce.x * 0.001 + mouseForce.x * config.simulation.mouseRepulsion);
-                velocitiesArr[i3 + 1] += (curlForce.y * 0.001 + mouseForce.y * config.simulation.mouseRepulsion);
-                velocitiesArr[i3 + 2] += (curlForce.z * 0.001 + mouseForce.z * config.simulation.mouseRepulsion);
-
-                velocitiesArr[i3] *= config.simulation.friction;
-                velocitiesArr[i3 + 1] *= config.simulation.friction;
-                velocitiesArr[i3 + 2] *= config.simulation.friction;
-
-                positionsAttr[i3] += velocitiesArr[i3];
-                positionsAttr[i3 + 1] += velocitiesArr[i3 + 1];
-                positionsAttr[i3 + 2] += velocitiesArr[i3 + 2];
-
-                if (Math.abs(positionsAttr[i3]) > config.particles.boxSize / 2) positionsAttr[i3] *= -1;
-                if (Math.abs(positionsAttr[i3+1]) > config.particles.boxSize / 2) positionsAttr[i3+1] *= -1;
-                if (Math.abs(positionsAttr[i3+2]) > config.particles.boxSize / 2) positionsAttr[i3+2] *= -1;
-            }
-
-            particleSystem.geometry.attributes.position.needsUpdate = true;
-
-            // Enhanced camera parallax with smooth follow
-            camera.position.x += (mouseRef.current.x * config.camera.parallaxIntensity - camera.position.x) * 0.03;
-            camera.position.y += (-mouseRef.current.y * config.camera.parallaxIntensity - camera.position.y) * 0.03;
-            camera.lookAt(scene.position);
-
-            composer.render();
-            frameId = requestAnimationFrame(animate);
-        };
-        animate();
-
-        const handleResize = () => {
-            const w = currentMount.clientWidth;
-            const h = currentMount.clientHeight;
-            camera.aspect = w / h;
-            camera.updateProjectionMatrix();
-            renderer.setSize(w, h);
-            composer.setSize(w, h);
-            fxaaPass.material.uniforms['resolution'].value.set(
-                1 / (w * window.devicePixelRatio),
-                1 / (h * window.devicePixelRatio)
-            );
-        };
-
-        const handleMouseMove = (e: MouseEvent) => {
-            mouseRef.current.x = (e.clientX / window.innerWidth) * 2 - 1;
-            mouseRef.current.y = -(e.clientY / window.innerHeight) * 2 + 1;
-        };
-
-        window.addEventListener("resize", handleResize);
-        window.addEventListener("mousemove", handleMouseMove);
-
-        return () => {
-            cancelAnimationFrame(frameId);
-            window.removeEventListener("resize", handleResize);
-            window.removeEventListener("mousemove", handleMouseMove);
-            if (currentMount && renderer.domElement) {
-                currentMount.removeChild(renderer.domElement);
-            }
-            particleGeometry.dispose();
-            particleMaterial.dispose();
-            secondaryGeometry.dispose();
-            secondaryMaterial.dispose();
-            composer.dispose();
-        };
-    }, []);
-
-    return <div ref={mountRef} className="absolute inset-0 w-full h-full z-0" />;
+  return <div ref={mount} aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden" style={{
+    backgroundImage: "radial-gradient(1px 1px at 19% 37%, #bedcffb3 70%, transparent), radial-gradient(1.5px 1.5px at 73% 21%, #d0ccff99 60%, transparent), radial-gradient(1px 1px at 43% 81%, #97d6ff99 70%, transparent)",
+    backgroundSize: "113px 167px, 219px 183px, 157px 137px",
+  }} />;
 }

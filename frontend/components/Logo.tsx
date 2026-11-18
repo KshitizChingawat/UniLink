@@ -41,8 +41,8 @@ const Logo = ({ size = 'md', showText = true, className = '' }: LogoProps) => {
         </div>
       </div>
       {showText && (
-        <span className={`font-bold text-white ${textSizeClasses[size]}`}>
-          Uni<span className="text-unilink-600">Link</span>
+        <span className={`font-bold text-slate-900 dark:text-white ${textSizeClasses[size]}`}>
+          Uni<span className="text-unilink-600 dark:text-sky-400">Link</span>
         </span>
       )}
     </div>

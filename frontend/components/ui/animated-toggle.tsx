@@ -250,7 +250,7 @@ const AnimatedToggle = ({
       <p
         className={cn(
           'text-center text-sm font-medium transition-colors duration-300',
-          isReady || isConnected ? 'text-unilink-700' : 'text-slate-500',
+          isReady || isConnected ? 'text-sky-200' : 'text-slate-300',
         )}
       >
         {statusText}
