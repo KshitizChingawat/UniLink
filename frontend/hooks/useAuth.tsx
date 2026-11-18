@@ -22,7 +22,7 @@ interface AuthContextValue {
   user: User | null;
   loading: boolean;
   signIn: (email: string, password: string, rememberMe?: boolean) => Promise<{ error: Error | null; shouldRedirect?: boolean }>;
-  signUp: (email: string, password: string, firstName: string, lastName: string) => Promise<{ error: Error | null }>;
+  signUp: (email: string, password: string, firstName: string, lastName: string, otp: string) => Promise<{ error: Error | null }>;
   requestRegistrationOtp: (email: string) => Promise<{ error: Error | null; developmentOtp?: string | null; deliveryMode?: "email" | "fallback" | null }>;
   verifyRegistrationOtp: (email: string, otp: string) => Promise<{ error: Error | null }>;
   signInWithGoogle: (email: string, rememberMe?: boolean) => Promise<{ error: Error | null }>;
@@ -65,43 +65,13 @@ const applyStoredTheme = () => {
   document.documentElement.setAttribute("data-theme-color", themeColor);
 };
 
-const persistRememberedAccount = (email: string, password: string) => {
-  const existing = JSON.parse(localStorage.getItem(rememberedAccountsKey) || "[]") as Array<{
-    email: string;
-    password: string;
-    lastUsed: string;
-  }>;
-
-  const filtered = existing.filter((account) => account.email !== email);
-  filtered.unshift({
-    email,
-    password,
-    lastUsed: new Date().toISOString(),
-  });
-
-  localStorage.setItem(rememberedAccountsKey, JSON.stringify(filtered.slice(0, 5)));
-};
-
-const clearRememberedAccount = (email: string) => {
-  const existing = JSON.parse(localStorage.getItem(rememberedAccountsKey) || "[]") as Array<{
-    email: string;
-    password: string;
-    lastUsed: string;
-  }>;
-
-  localStorage.setItem(
-    rememberedAccountsKey,
-    JSON.stringify(existing.filter((account) => account.email !== email)),
-  );
-};
-
 const isLikelyRealEmail = (email: string) => {
   const normalized = email.trim().toLowerCase();
   const [, domain = ""] = normalized.split("@");
   return Boolean(domain) && !blockedEmailDomains.has(domain);
 };
 
-const fetchWithTimeout = async <T,>(input: string, init: RequestInit, timeoutMs = 20000) => {
+const fetchWithTimeout = async <T,>(input: string, init: RequestInit, timeoutMs = 75000) => {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
 
@@ -122,6 +92,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   useEffect(() => {
     const bootstrap = async () => {
+      localStorage.removeItem(rememberedAccountsKey);
       applyStoredTheme();
       const token = localStorage.getItem("auth_token");
       const userData = localStorage.getItem("user_data");
@@ -182,12 +153,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       localStorage.setItem("auth_token", data.token);
       localStorage.setItem("user_data", JSON.stringify(data.user));
       persistRememberedEmail(normalizedEmail, rememberMe);
-      if (rememberMe) {
-        persistRememberedAccount(normalizedEmail, password);
-      } else {
-        clearRememberedAccount(normalizedEmail);
-      }
-
       setUser(data.user);
       setTimeout(() => navigate("/dashboard"), 100);
       return { error: null };
@@ -229,7 +194,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
   };
 
-  const signUp = async (email: string, password: string, firstName: string, lastName: string) => {
+  const signUp = async (email: string, password: string, firstName: string, lastName: string, otp: string) => {
     const normalizedEmail = email.trim().toLowerCase();
     if (!isLikelyRealEmail(normalizedEmail)) {
       const error = new Error("Enter a valid email address");
@@ -244,6 +209,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           password,
           firstName: firstName.trim(),
           lastName: lastName.trim(),
+          otp,
         }),
       });
 

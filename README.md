@@ -138,3 +138,11 @@ Final Year B.Tech (CSE)
 ## 💡 Final Note
 
 > UniLink is not just an app — it’s a step toward a unified digital ecosystem.
+
+### Authentication on Render
+
+Use Node 22.9 or newer and run the build and start commands from the repository root. Keep the same Supabase project and private `unilink-db` bucket across deployments. Accounts and verification records live in `db.json` in that bucket. Run one backend instance because updates to this shared object use a process-local write lock.
+
+Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and `SMTP_FROM` in the Render service environment. Use a sender authorized by your mail provider. For Mailtrap Email Sending, a Mailtrap SMTP hostname with username `api` selects the HTTPS delivery path. Signup and password recovery require email delivery in production. Codes expire after ten minutes, and resending replaces the previous code.
+
+After deploying, register with an inbox you control, sign out, sign in again, and complete password recovery using the new email code. Keep service credentials in Render environment settings.

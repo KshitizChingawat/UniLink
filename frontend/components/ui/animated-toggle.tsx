@@ -51,13 +51,18 @@ const AnimatedToggle = ({
     setPhase('animating');
     await wait(650);
 
-    const result = await onActivate?.();
-    if (result === false) {
-      setPhase('idle');
-      return;
-    }
+    try {
+      const result = await onActivate?.();
+      if (result === false) {
+        setPhase('idle');
+        return;
+      }
 
-    setPhase('connected');
+      setPhase('connected');
+    } catch {
+      // Let the caller present the error, but always make the control usable again.
+      setPhase('idle');
+    }
   };
 
   return (

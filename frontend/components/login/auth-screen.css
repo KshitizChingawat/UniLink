@@ -1,0 +1,58 @@
+.ul-auth {
+  min-height:100dvh; padding:0 clamp(18px,5vw,84px) 40px; color:#19233a;
+  background:#f4f6fa; font-family:Inter,"Segoe UI",sans-serif;
+}
+.ul-header,.ul-layout {max-width:1230px;margin:auto}
+.ul-header {height:86px;display:flex;align-items:center;justify-content:space-between}
+.ul-brand,.ul-home,.ul-art-caption,.ul-submit,.ul-options,.ul-options label,.ul-terms {display:flex;align-items:center}
+.ul-brand {gap:9px;font-size:23px;font-weight:750;letter-spacing:-1.4px}
+.ul-brand span,.ul-node {display:grid;place-items:center}
+.ul-brand span {background:#393ed1;color:white;width:34px;height:34px;border-radius:11px}
+.ul-home {gap:6px;font-size:13px;color:#46506a}
+.ul-layout {display:grid;grid-template-columns:1fr 1fr;border:1px solid #d9dfe9;background:#fff;border-radius:28px;overflow:hidden;box-shadow:0 22px 70px -48px #283756}
+.ul-art {position:relative;isolation:isolate;overflow:hidden;min-height:min(710px,78vh);color:white;background:radial-gradient(ellipse at 82% 72%,#5047c8 0,transparent 52%),radial-gradient(ellipse at 4% 42%,#234dbb 0,transparent 68%),#111e4d}
+.ul-grid {position:absolute;inset:0;z-index:-1;opacity:.34;background-image:radial-gradient(#a4bef5 0.8px,transparent 1px);background-size:19px 19px;mask-image:linear-gradient(150deg,transparent,#000)}
+.ul-art-title {position:relative;z-index:2;padding:clamp(30px,4vw,64px);font-size:clamp(46px,5.4vw,82px);font-weight:600;line-height:.99;letter-spacing:-.072em;pointer-events:none}
+.ul-art-title em {font-weight:400;font-family:Georgia,serif;color:#bfceff;letter-spacing:-.06em}
+.ul-orbits {position:absolute;width:82%;height:43%;left:9%;top:40%;transform:rotate(-23deg);animation:ul-hover 8s ease-in-out infinite}
+.ul-ring {position:absolute;top:5%;width:57%;height:86%;border-radius:50%;border:clamp(9px,1.6vw,24px) solid #9ebcff;box-shadow:inset 2px 3px 7px #d7eeff, inset -5px -6px 14px #4c54d7,3px 8px 0 #4456bd,7px 18px 29px #080f4d77}
+.ul-ring-one {left:0;transform:rotateY(-24deg) rotateX(40deg);background:linear-gradient(25deg,#7599fa25,transparent)}
+.ul-ring-two {right:0;top:19%;border-color:#b3a6ff;transform:rotateY(26deg) rotateX(-38deg)}
+.ul-ring i {position:absolute;inset:-4px;border:2px dashed #fff9;border-radius:inherit;animation:ul-signal 4s ease-in-out infinite alternate}
+.ul-ring-two i {animation-delay:-2s}
+.ul-node {position:absolute;border-radius:15px;width:50px;height:50px;color:#e8edff;background:#26376c;border:1px solid #a6baff88;transform:rotate(23deg);box-shadow:0 8px 22px #131f5144}
+.ul-laptop {left:8%;top:7%}.ul-phone {right:4%;bottom:1%}
+.ul-art-caption {position:absolute;bottom:32px;left:clamp(30px,4vw,64px);gap:10px;font-size:13px;color:#dde6ff}
+.ul-panel {display:grid;align-items:center;padding:clamp(24px,4.3vw,68px)}
+.ul-formwrap {width:100%;max-width:410px;margin:auto;animation:ul-enter .38s ease-out}
+.ul-formwrap h1 {font-size:clamp(32px,3.4vw,49px);line-height:1.05;letter-spacing:-.065em;font-weight:650}
+.ul-description,.ul-switch,.ul-formwrap small {color:#58627a;font-size:14px;line-height:1.55}
+.ul-description {margin:10px 0 27px;overflow-wrap:anywhere}
+.ul-formwrap fieldset {display:grid;gap:15px;min-width:0}
+.ul-field {min-width:0}.ul-field label {display:block;font-size:13px;font-weight:650;margin-bottom:6px}
+.ul-field>div {position:relative}.ul-field input {width:100%;border:1px solid #cbd2df;border-radius:10px;height:45px;padding:0 13px;background:#fcfdff;color:#17213b;transition:border-color .2s,box-shadow .2s}
+.ul-field input:focus {outline:0;border-color:#5a57e8;box-shadow:0 0 0 3px #5855e61c}
+.ul-field input:has(+button) {padding-right:44px}.ul-field button {position:absolute;right:0;top:0;height:100%;padding:0 14px;color:#58627a}
+.ul-names {display:grid;grid-template-columns:1fr 1fr;gap:12px}.ul-field input#otp {letter-spacing:.38em;font-variant-numeric:tabular-nums}
+.ul-options {justify-content:space-between;gap:8px;flex-wrap:wrap}.ul-options,.ul-terms,.ul-switch {font-size:13px}
+.ul-options label,.ul-terms {gap:8px}.ul-auth input[type=checkbox] {accent-color:#4844cf;width:16px;height:16px}
+.ul-options button,.ul-switch a,.ul-terms a,.ul-switch button {font-weight:650;color:#4945c8}
+.ul-formwrap small {margin-top:-11px;font-size:12px}
+.ul-submit {justify-content:space-between;color:white;background:#4643c9;padding:0 18px;height:47px;border-radius:11px;font-weight:650;transition:background .2s,transform .2s}
+.ul-submit:hover {background:#3532b4}.ul-submit:active {transform:translateY(1px)}
+.ul-submit:disabled {opacity:.7}.ul-switch {text-align:center;border-top:1px solid #e3e7ef;margin-top:24px;padding-top:20px}
+.ul-error,.ul-notice {padding:10px 12px;border-radius:8px;font-size:13px}.ul-error {background:#fff0f1;color:#9d223c}.ul-notice {background:#eaf6f2;color:#175644}
+.ul-spin {animation:ul-spin 1s linear infinite}
+@keyframes ul-hover {50% {transform:translateY(-9px) rotate(-19deg)}}
+@keyframes ul-signal {from {opacity:.25}to {opacity:.9}}
+@keyframes ul-enter {from {opacity:0;transform:translateY(7px)}}
+@keyframes ul-spin {to {transform:rotate(360deg)}}
+@media(max-width:750px) {
+ .ul-header {height:64px}.ul-layout {grid-template-columns:1fr;border-radius:20px}.ul-art {min-height:135px}
+ .ul-art-title {padding:24px;font-size:38px}.ul-art-caption {display:none}
+ .ul-orbits {width:39%;height:75%;left:57%;top:12%}.ul-node {width:28px;height:28px;border-radius:8px}.ul-node svg {width:15px}
+ .ul-panel {padding:30px 21px}.ul-field input {font-size:16px}
+}
+@media(prefers-reduced-motion:reduce) {
+ .ul-auth *,.ul-auth *::before,.ul-auth *::after {animation:none!important;transition:none!important}
+}

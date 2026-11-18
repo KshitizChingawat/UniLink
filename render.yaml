@@ -8,7 +8,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: PORT
-        value: "8787"
+        value: "22000"
       - key: JWT_SECRET
         sync: false
       - key: JWT_EXPIRES_IN
@@ -22,10 +22,20 @@ services:
       - key: APP_BASE_URL
         sync: false
       - key: ALLOW_OTP_FALLBACK
-        value: "true"
+        value: "false"
       - key: ALLOW_DEMO_GOOGLE_LOGIN
         value: "false"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
         sync: false

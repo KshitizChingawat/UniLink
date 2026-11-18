@@ -1,145 +1,28 @@
-import cors from "cors";
 import express from "express";
-import helmet from "helmet";
-import rateLimit from "express-rate-limit";
 import { fileTypeFromBuffer } from "file-type";
 import { randomInt, randomUUID } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createWriteStream } from "node:fs";
 import { mkdir, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
 import { z } from "zod";
 import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
-import { isEmailVerificationConfigured, isMailtrapDemoRestrictionError, sendRegistrationOtp } from "./mailer.js";
+import { isEmailVerificationConfigured, sendEmailOtp } from "./mailer.js";
 import { clearAuthCookies, comparePassword, createCsrfToken, hashPassword, requireAuth, requireCsrf, revokeToken, sanitizeUser, setAuthCookies, signAuthToken } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
 import { ensureRelativeStoragePath, isZipBombCandidate, nowIso, sanitizeFilename, sanitizeMimeType, sanitizeTextInput } from "./helpers.js";
 import { createId, ensureDataDirs, loadDb, saveDb } from "./storage.js";
 import { appConfig } from "./config.js";
-import { createErrorHandler, rejectDisallowedOrigin } from "./http.js";
-import { httpLogger, logger } from "./logger.js";
+import { createErrorHandler } from "./http.js";
+import { logger } from "./logger.js";
+import { configureApp, rateLimits } from "./middleware/app.js";
+import { ensureConfiguredAdmin } from "./services/admin-bootstrap.js";
 const app = express();
 const port = appConfig.port;
-const nodeEnv = appConfig.nodeEnv;
 const isProduction = appConfig.isProduction;
-const allowedOrigins = appConfig.allowedOrigins;
-const supabaseOrigin = (() => {
-    const raw = appConfig.supabaseUrl || "";
-    if (!raw)
-        return null;
-    try {
-        return new URL(raw).origin;
-    }
-    catch {
-        return null;
-    }
-})();
-const supabaseStorageOrigin = (() => {
-    const raw = appConfig.supabaseUrl || "";
-    if (!raw)
-        return null;
-    try {
-        return new URL(raw.replace(".supabase.co", ".storage.supabase.co")).origin;
-    }
-    catch {
-        return null;
-    }
-})();
-const isTrustedProductionOrigin = (origin) => {
-    try {
-        const url = new URL(origin);
-        const hostname = url.hostname.toLowerCase();
-        return hostname.endsWith(".onrender.com") && hostname.includes("unilink");
-    }
-    catch {
-        return false;
-    }
-};
-app.set("trust proxy", 1);
-app.disable("x-powered-by");
-app.use(httpLogger);
-app.use(cors({
-    origin: (origin, callback) => {
-        if (!origin) {
-            callback(null, true);
-            return;
-        }
-        if (allowedOrigins.includes(origin)) {
-            callback(null, true);
-            return;
-        }
-        if (isProduction && isTrustedProductionOrigin(origin)) {
-            callback(null, true);
-            return;
-        }
-        callback(new Error("Origin not allowed by CORS"));
-    },
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: [
-        "Content-Type",
-        "Authorization",
-        "X-File-Name",
-        "X-File-Size",
-        "X-File-Type",
-        "X-Sender-Device-Id",
-        "X-Receiver-Device-Id",
-        "X-Transfer-Method",
-        "X-Upload-Id",
-        "X-Chunk-Index",
-        "X-Total-Chunks",
-        "X-CSRF-Token",
-    ],
-    exposedHeaders: ["Content-Disposition"],
-    credentials: true,
-    preflightContinue: false,
-    optionsSuccessStatus: 204,
-}));
-app.use(rejectDisallowedOrigin);
-const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 200,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { error: "Too many requests. Please slow down and try again." },
-});
-const authLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 20,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { error: "Too many authentication attempts. Please try again later." },
-});
-const tokenLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000,
-    max: 10,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { error: "Too many token requests. Please try again later." },
-});
-const fileListLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000,
-    max: 60,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { error: "Too many file listing requests. Please try again later." },
-});
-const syncLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: 60,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { error: "Too many sync requests. Please try again later." },
-});
-const uploadLimiter = rateLimit({
-    // Chunked uploads legitimately create many requests, so keep abuse protection
-    // without throttling normal medium/large file transfers.
-    windowMs: 15 * 60 * 1000,
-    max: 1500,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { error: "Too many upload requests. Please wait before uploading again." },
-});
+configureApp(app);
+const { auth: authLimiter, token: tokenLimiter, fileList: fileListLimiter, sync: syncLimiter, upload: uploadLimiter } = rateLimits;
 const MAX_SINGLE_FILE_SIZE = appConfig.maxFileSizeBytes;
 const FREE_TOTAL_USER_STORAGE = 500 * 1024 * 1024;
 const PRO_TOTAL_USER_STORAGE = 100 * 1024 * 1024 * 1024;
@@ -148,61 +31,14 @@ const PRO_MAX_ACTIVE_UPLOADS = 10;
 const MAX_FILES_PER_SELECTION = 10;
 const FREE_FILE_SIZE_LIMIT = Math.max(100 * 1024 * 1024, MAX_SINGLE_FILE_SIZE);
 const PRO_FILE_SIZE_LIMIT = Math.max(10 * 1024 * 1024 * 1024, MAX_SINGLE_FILE_SIZE);
+// Keep moderate uploads synchronous so the UI can finish the transfer in one
+// final response instead of lingering in a background processing state.
 const SYNC_COMPLETE_UPLOAD_LIMIT_BYTES = 256 * 1024 * 1024;
 const MONTH_IN_MS = 30 * 24 * 60 * 60 * 1000;
-const OTP_FALLBACK_ENABLED = appConfig.allowOtpFallback;
+const OTP_FALLBACK_ENABLED = !isProduction && appConfig.allowOtpFallback;
 const DEMO_GOOGLE_LOGIN_ENABLED = !isProduction && appConfig.allowDemoGoogleLogin;
-const strictContentSecurityPolicyDirectives = {
-    defaultSrc: ["'self'"],
-    scriptSrc: ["'self'"],
-    styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-    fontSrc: ["'self'", "https://fonts.gstatic.com"],
-    imgSrc: ["'self'", "data:", "blob:", "https://api.qrserver.com", ...(supabaseOrigin ? [supabaseOrigin] : []), ...(supabaseStorageOrigin ? [supabaseStorageOrigin] : [])],
-    mediaSrc: ["'self'", "blob:", ...(supabaseOrigin ? [supabaseOrigin] : []), ...(supabaseStorageOrigin ? [supabaseStorageOrigin] : [])],
-    connectSrc: ["'self'", ...allowedOrigins, ...(supabaseOrigin ? [supabaseOrigin] : []), ...(supabaseStorageOrigin ? [supabaseStorageOrigin] : [])],
-    objectSrc: ["'none'"],
-    baseUri: ["'self'"],
-    frameAncestors: ["'none'"],
-    formAction: ["'self'"],
-};
-app.use(helmet({
-    crossOriginResourcePolicy: false,
-    contentSecurityPolicy: {
-        directives: strictContentSecurityPolicyDirectives,
-    },
-    hsts: isProduction
-        ? {
-            maxAge: 31536000,
-            includeSubDomains: true,
-            preload: true,
-        }
-        : false,
-    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
-    permittedCrossDomainPolicies: { permittedPolicies: "none" },
-}));
-app.use((_req, res, next) => {
-    res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
-    res.setHeader("X-Frame-Options", "DENY");
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    next();
-});
-app.use(globalLimiter);
-app.get("/admin", (req, res) => {
-    logger.warn({ ip: req.ip, userAgent: req.headers["user-agent"] }, "Honeypot route hit");
-    res.json({ status: "ok", system: "public", message: "No administrative access exposed." });
-});
-// Skip body parsing for the binary file upload route — it reads req stream directly
-app.use((req, res, next) => {
-    if (req.path === "/api/file-transfers/upload" || req.path === "/api/file-transfers/chunk")
-        return next();
-    express.json({ limit: "2mb" })(req, res, next);
-});
-app.use((req, res, next) => {
-    if (req.path === "/api/file-transfers/upload" || req.path === "/api/file-transfers/chunk")
-        return next();
-    express.urlencoded({ extended: true, limit: "2mb" })(req, res, next);
-});
 const registerSchema = z.object({
+    otp: z.string().regex(/^\d{6}$/),
     email: z.string().trim().email().max(120),
     password: z.string().min(8).max(128),
     firstName: z.string().trim().min(1).max(60),
@@ -324,7 +160,7 @@ const uploadChunkHeadersSchema = z.object({
     "x-total-chunks": z.coerce.number().int().min(1),
 });
 const uploadSessions = new Map();
-const LARGE_UPLOAD_CHUNK_BYTES = 5 * 1024 * 1024;
+const LARGE_UPLOAD_CHUNK_BYTES = 50 * 1024 * 1024;
 const UPLOAD_TEMP_ROOT = path.join(os.tmpdir(), "unilink-upload-sessions");
 const UPLOAD_SESSION_STALE_MS = 30 * 60 * 1000;
 const UPLOAD_REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
@@ -534,6 +370,84 @@ const cleanupUploadSession = async (session) => {
     await rm(session.tempDir, { recursive: true, force: true }).catch(() => undefined);
 };
 const findUploadSessionByTransferId = (transferId, userId) => Array.from(uploadSessions.values()).find((session) => session.transferId === transferId && session.userId === userId) || null;
+const getChunkStoragePath = (storagePath, chunkIndex) => ensureRelativeStoragePath(`${storagePath}/chunks/${String(chunkIndex).padStart(6, "0")}.part`);
+const createPendingUploadSession = async (transfer) => {
+    if (transfer.transferStatus !== "in_progress" || !transfer.filePath || !transfer.uploadSessionId) {
+        return null;
+    }
+    const tempDir = transfer.uploadTempDir || path.join(UPLOAD_TEMP_ROOT, transfer.uploadSessionId);
+    await mkdir(tempDir, { recursive: true });
+    const session = {
+        id: transfer.uploadSessionId,
+        userId: transfer.userId,
+        transferId: transfer.id,
+        fileName: transfer.fileName,
+        fileSize: transfer.fileSize,
+        fileType: transfer.fileType,
+        senderDeviceId: transfer.senderDeviceId,
+        receiverDeviceId: transfer.receiverDeviceId,
+        transferMethod: transfer.transferMethod,
+        storagePath: transfer.filePath,
+        tempDir,
+        chunkSize: transfer.uploadChunkSize || LARGE_UPLOAD_CHUNK_BYTES,
+        totalChunks: transfer.uploadTotalChunks || Math.max(1, Math.ceil(transfer.fileSize / (transfer.uploadChunkSize || LARGE_UPLOAD_CHUNK_BYTES))),
+        createdAt: transfer.createdAt,
+        updatedAt: transfer.uploadUpdatedAt || transfer.createdAt,
+        uploadedChunks: new Set(transfer.uploadUploadedChunks || []),
+        isDirectUpload: false,
+    };
+    const uploadedChunks = await getUploadedChunkIndices(session);
+    session.uploadedChunks = new Set(uploadedChunks);
+    uploadSessions.set(session.id, session);
+    return session;
+};
+const getActiveUploadSessionById = async (uploadId, userId) => {
+    const existingSession = uploadSessions.get(uploadId);
+    if (existingSession && existingSession.userId === userId) {
+        return existingSession;
+    }
+    const db = await loadDb();
+    const transfer = db.fileTransfers.find((entry) => entry.userId === userId &&
+        entry.uploadSessionId === uploadId &&
+        entry.transferStatus === "in_progress");
+    if (!transfer) {
+        return null;
+    }
+    return createPendingUploadSession(transfer);
+};
+const getActiveUploadSessionByTransferId = async (transferId, userId) => {
+    const existingSession = findUploadSessionByTransferId(transferId, userId);
+    if (existingSession) {
+        return existingSession;
+    }
+    const db = await loadDb();
+    const transfer = getOwnedTransfer(db, userId, transferId);
+    if (!transfer?.uploadSessionId || transfer.transferStatus !== "in_progress") {
+        return null;
+    }
+    return createPendingUploadSession(transfer);
+};
+const removeStoredTransferArtifacts = async (transfer) => {
+    if (!transfer?.filePath)
+        return;
+    if (transfer.storageMode === "chunked") {
+        const chunkTotal = transfer.uploadTotalChunks || 0;
+        const chunkPaths = Array.from({ length: chunkTotal }, (_, index) => getChunkStoragePath(transfer.filePath, index));
+        if (chunkPaths.length > 0) {
+            const { error } = await supabase.storage.from(FILE_BUCKET).remove(chunkPaths);
+            if (error) {
+                console.error("Supabase Storage chunk delete error:", error);
+            }
+        }
+        return;
+    }
+    const { error } = await supabase.storage
+        .from(FILE_BUCKET)
+        .remove([ensureRelativeStoragePath(transfer.filePath)]);
+    if (error) {
+        console.error("Supabase Storage delete error:", error);
+    }
+};
 const removeStoredTransferFile = async (filePath) => {
     if (!filePath)
         return;
@@ -561,6 +475,26 @@ const cleanupStaleUploadSessions = async () => {
         await cleanupUploadSession(session);
     }
     if (dbChanged) {
+        await saveDb(db);
+    }
+    const persistedStaleTransfers = db.fileTransfers.filter((transfer) => transfer.transferStatus === "in_progress" &&
+        Boolean(transfer.uploadSessionId) &&
+        new Date(transfer.uploadUpdatedAt || transfer.createdAt).getTime() < cutoff);
+    if (persistedStaleTransfers.length === 0) {
+        return;
+    }
+    let persistedDbChanged = false;
+    for (const transfer of persistedStaleTransfers) {
+        const activeSession = transfer.uploadSessionId ? uploadSessions.get(transfer.uploadSessionId) : null;
+        if (activeSession) {
+            await cleanupUploadSession(activeSession);
+        }
+        await removeStoredTransferArtifacts(transfer);
+        transfer.transferStatus = "failed";
+        transfer.completedAt = nowIso();
+        persistedDbChanged = true;
+    }
+    if (persistedDbChanged) {
         await saveDb(db);
     }
 };
@@ -636,6 +570,24 @@ app.get("/api/health", async (_req, res) => {
         res.status(503).json({ status: "error", uptime: process.uptime(), db: "error" });
     }
 });
+async function issueEmailCode(db, email, purpose) {
+    const otp = createOtp();
+    consumeExpiredEmailVerifications(db);
+    db.emailVerifications = db.emailVerifications.filter(entry => entry.email !== email || entry.purpose !== purpose);
+    db.emailVerifications.unshift({
+        id: `${purpose}:${email}`, email, purpose, otpHash: await hashPassword(otp),
+        createdAt: nowIso(), expiresAt: new Date(Date.now() + 600000).toISOString(),
+    });
+    let response = { message: "Check your email for your six-digit code." };
+    if (!isEmailVerificationConfigured() && OTP_FALLBACK_ENABLED && purpose === "register") {
+        response = registrationOtpFallbackResponse("Local development verification code", otp);
+    }
+    else {
+        await sendEmailOtp(email, otp, purpose);
+    }
+    await saveDb(db);
+    return response;
+}
 app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) => {
     const parsed = registrationOtpRequestSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -655,47 +607,8 @@ app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) =>
             res.status(409).json({ error: "Email is already registered" });
             return;
         }
-        const otp = createOtp();
-        const timestamp = nowIso();
-        const verification = {
-            id: createId(),
-            email,
-            purpose: "register",
-            otpHash: await hashPassword(otp),
-            createdAt: timestamp,
-            expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-        };
-        db.emailVerifications = db.emailVerifications.filter((entry) => !(entry.email === email && entry.purpose === "register"));
-        db.emailVerifications.unshift(verification);
-        await saveDb(db);
-        if (!isEmailVerificationConfigured()) {
-            if (OTP_FALLBACK_ENABLED) {
-                res.json(registrationOtpFallbackResponse("Email delivery is not configured right now. Use the temporary OTP shown below to continue signup.", otp));
-                return;
-            }
-            res.status(503).json({
-                error: "Email verification is not configured yet. Add SMTP settings on the server first.",
-            });
-            return;
-        }
-        try {
-            await sendRegistrationOtp(email, otp);
-            res.json({
-                success: true,
-                message: "Verification code sent to your email.",
-            });
-            return;
-        }
-        catch (mailError) {
-            if (OTP_FALLBACK_ENABLED) {
-                const fallbackMessage = isMailtrapDemoRestrictionError(mailError)
-                    ? "Email delivery is in testing mode. Use the temporary OTP shown below."
-                    : "Email delivery is temporarily unavailable. Use the temporary OTP shown below to continue signup.";
-                res.json(registrationOtpFallbackResponse(fallbackMessage, otp));
-                return;
-            }
-            throw mailError;
-        }
+        const response = await issueEmailCode(db, email, "register");
+        res.json(response);
     }
     catch (error) {
         console.error("Registration OTP error:", error);
@@ -754,12 +667,12 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
     try {
         const db = await loadDb();
         consumeExpiredEmailVerifications(db);
-        if (db.users.some((user) => user.email === email)) {
-            res.json({ error: "Email is already registered", duplicateEmail: true });
+        if (db.users.some((user) => normalizeEmail(user.email) === email)) {
+            res.status(409).json({ error: "Email is already registered", duplicateEmail: true });
             return;
         }
         const verification = getLatestEmailVerification(db, email);
-        if (!isEmailVerificationValid(verification)) {
+        if (!verification || !isEmailVerificationValid(verification) || !(await comparePassword(parsed.data.otp, verification.otpHash))) {
             res.status(400).json({ error: "Verify your email with the OTP before creating the account." });
             return;
         }
@@ -902,16 +815,45 @@ app.post("/api/auth/forgot-password", authLimiter, async (req, res) => {
     try {
         const db = await loadDb();
         const user = db.users.find((entry) => normalizeEmail(entry.email) === email);
-        res.json({
-            success: true,
-            message: user
-                ? "Password reset support has been initiated for this account."
-                : "If an account exists for this email, password reset support has been initiated.",
-        });
+        if (!isEmailVerificationConfigured()) {
+            res.status(503).json({ error: "Recovery email is unavailable. Please try again later." });
+            return;
+        }
+        if (user)
+            await issueEmailCode(db, email, "reset");
+        res.json({ message: "If this email has an account, a reset code is on its way." });
     }
     catch (error) {
-        console.error("Forgot password lookup error:", error);
-        res.status(500).json({ error: "Unable to start password reset support right now." });
+        console.error("Recovery email error:", error);
+        res.status(503).json({ error: "Unable to send a recovery email right now." });
+    }
+});
+const resetSchema = registrationOtpVerifySchema.extend({ password: registerSchema.shape.password });
+app.post("/api/auth/reset-password", authLimiter, async (req, res) => {
+    const parsed = resetSchema.safeParse(req.body);
+    if (!parsed.success || !isStrongPassword(parsed.data.password)) {
+        res.status(400).json({ error: "Enter the six-digit code and a password with at least eight characters and a symbol." });
+        return;
+    }
+    try {
+        const email = normalizeEmail(parsed.data.email);
+        const db = await loadDb();
+        consumeExpiredEmailVerifications(db);
+        const code = db.emailVerifications.find(entry => entry.email === email && entry.purpose === "reset");
+        const user = db.users.find(entry => normalizeEmail(entry.email) === email);
+        if (!user || !code || !(await comparePassword(parsed.data.otp, code.otpHash))) {
+            res.status(400).json({ error: "Invalid or expired code. Check your email or request another code." });
+            return;
+        }
+        user.passwordHash = await hashPassword(parsed.data.password);
+        user.updatedAt = nowIso();
+        db.emailVerifications = db.emailVerifications.filter(entry => entry.id !== code.id);
+        await saveDb(db);
+        res.json({ message: "Password updated. Sign in with your new password." });
+    }
+    catch (error) {
+        console.error("Password reset error:", error);
+        res.status(503).json({ error: "Unable to update the password. Please try again." });
     }
 });
 app.post("/api/auth/change-password", requireAuth, requireCsrf, async (req, res) => {
@@ -1419,6 +1361,12 @@ app.post("/api/file-transfers/initiate", uploadLimiter, requireAuth, requireCsrf
         transferMethod: parsed.data.transferMethod,
         createdAt: session.createdAt,
         filePath: storagePath,
+        storageMode: "chunked",
+        uploadSessionId: session.id,
+        uploadTempDir: tempDir,
+        uploadChunkSize: session.chunkSize,
+        uploadTotalChunks: session.totalChunks,
+        uploadUpdatedAt: session.updatedAt,
     };
     db.fileTransfers = [transfer, ...db.fileTransfers.filter((entry) => entry.id !== transfer.id)];
     await saveDb(db);
@@ -1440,7 +1388,7 @@ app.get("/api/file-transfers/upload-status/:uploadId", fileListLimiter, requireA
         res.status(400).json({ error: "Upload session ID is required." });
         return;
     }
-    const session = uploadSessions.get(uploadId);
+    const session = await getActiveUploadSessionById(uploadId, req.auth.userId);
     if (!session || session.userId !== req.auth.userId) {
         res.status(404).json({ error: "Upload session not found" });
         return;
@@ -1465,7 +1413,7 @@ app.delete("/api/file-transfers/upload-session/:uploadId", uploadLimiter, requir
         res.status(400).json({ error: "Upload session ID is required." });
         return;
     }
-    const session = uploadSessions.get(uploadId);
+    const session = await getActiveUploadSessionById(uploadId, req.auth.userId);
     if (!session || session.userId !== req.auth.userId) {
         res.status(404).json({ error: "Upload session not found" });
         return;
@@ -1487,7 +1435,7 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
         res.status(400).json({ error: "Invalid upload chunk metadata" });
         return;
     }
-    const session = uploadSessions.get(parsed.data["x-upload-id"]);
+    const session = await getActiveUploadSessionById(parsed.data["x-upload-id"], req.auth.userId);
     if (!session || session.userId !== req.auth.userId) {
         res.status(404).json({ error: "Upload session not found" });
         return;
@@ -1507,6 +1455,19 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
     const existingChunkIndices = await getUploadedChunkIndices(session);
     if (existingChunkIndices.includes(chunkIndex)) {
         session.updatedAt = nowIso();
+        const db = await loadDb();
+        const transfer = db.fileTransfers.find((entry) => entry.id === session.transferId && entry.userId === req.auth.userId);
+        if (transfer) {
+            transfer.uploadSessionId = session.id;
+            transfer.uploadTempDir = session.tempDir;
+            transfer.uploadChunkSize = session.chunkSize;
+            transfer.uploadTotalChunks = session.totalChunks;
+            transfer.uploadUpdatedAt = session.updatedAt;
+            if (!transfer.storageMode) {
+                transfer.storageMode = "chunked";
+            }
+            await saveDb(db);
+        }
         res.status(200).json({
             uploadId: session.id,
             chunkIndex,
@@ -1557,8 +1518,44 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
         res.status(400).json({ error: "Uploaded chunk size did not match the expected size." });
         return;
     }
+    try {
+        const chunkBuffer = await readFile(chunkPath);
+        const storageChunkPath = getChunkStoragePath(session.storagePath, chunkIndex);
+        const { error: chunkUploadError } = await supabase.storage
+            .from(FILE_BUCKET)
+            .upload(storageChunkPath, chunkBuffer, {
+            contentType: "application/octet-stream",
+            upsert: false,
+        });
+        if (chunkUploadError) {
+            throw new Error(`Failed to store uploaded chunk: ${chunkUploadError.message}`);
+        }
+    }
+    catch (error) {
+        await rm(chunkPath, { force: true }).catch(() => undefined);
+        const message = error instanceof Error ? error.message : "Chunk upload failed";
+        res.status(500).json({ error: message });
+        return;
+    }
+    await rm(chunkPath, { force: true }).catch(() => undefined);
     session.uploadedChunks.add(chunkIndex);
     session.updatedAt = nowIso();
+    {
+        const db = await loadDb();
+        const transfer = db.fileTransfers.find((entry) => entry.id === session.transferId && entry.userId === req.auth.userId);
+        if (transfer) {
+            transfer.uploadSessionId = session.id;
+            transfer.uploadTempDir = session.tempDir;
+            transfer.uploadChunkSize = session.chunkSize;
+            transfer.uploadTotalChunks = session.totalChunks;
+            transfer.uploadUploadedChunks = Array.from(session.uploadedChunks).sort((a, b) => a - b);
+            transfer.uploadUpdatedAt = session.updatedAt;
+            if (!transfer.storageMode) {
+                transfer.storageMode = "chunked";
+            }
+            await saveDb(db);
+        }
+    }
     res.status(201).json({
         uploadId: session.id,
         chunkIndex,
@@ -1572,7 +1569,7 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
         res.status(400).json({ error: "Upload session ID is required." });
         return;
     }
-    const session = uploadSessions.get(uploadId);
+    const session = await getActiveUploadSessionById(uploadId, req.auth.userId);
     if (!session || session.userId !== req.auth.userId) {
         res.status(404).json({ error: "Upload session not found" });
         return;
@@ -1600,41 +1597,42 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
                 if (uploadedChunkIndices.length !== session.totalChunks) {
                     throw new Error("Upload is still missing one or more chunks.");
                 }
-                const assembledPath = path.join(session.tempDir, "assembled-upload.bin");
-                await new Promise((resolve, reject) => {
-                    const output = createWriteStream(assembledPath);
-                    const appendNext = (index) => {
-                        if (index >= uploadedChunkIndices.length) {
-                            output.end();
-                            return;
-                        }
-                        const input = createReadStream(getUploadChunkPath(session, uploadedChunkIndices[index]));
-                        input.on("error", reject);
-                        input.on("end", () => appendNext(index + 1));
-                        input.pipe(output, { end: false });
-                    };
-                    output.on("finish", resolve);
-                    output.on("error", reject);
-                    appendNext(0);
-                });
                 const scanResult = await scanUploadedPayload(session.fileName, sanitizeMimeType(session.fileType), session.fileSize);
                 if (!scanResult.clean) {
                     throw new Error("The uploaded file failed security scanning.");
                 }
-                const fileBuffer = await readFile(assembledPath);
-                const fileValidationError = await validateUploadedFileBuffer(fileBuffer, sanitizeMimeType(session.fileType), session.fileSize);
-                if (fileValidationError) {
-                    throw new Error(fileValidationError);
-                }
-                const { error: uploadError } = await supabase.storage
-                    .from(FILE_BUCKET)
-                    .upload(ensureRelativeStoragePath(session.storagePath), fileBuffer, {
-                    contentType: sanitizeMimeType(session.fileType),
-                    upsert: false,
-                });
-                if (uploadError) {
-                    throw new Error(`Failed to store assembled upload: ${uploadError.message}`);
-                }
+                const currentDb = await loadDb();
+                const currentTransfer = currentDb.fileTransfers.find((entry) => entry.id === session.transferId && entry.userId === req.auth.userId);
+                const transfer = currentTransfer || {
+                    id: session.transferId,
+                    userId: req.auth.userId,
+                    senderDeviceId: session.senderDeviceId,
+                    receiverDeviceId: session.receiverDeviceId,
+                    fileName: session.fileName,
+                    fileSize: session.fileSize,
+                    fileType: session.fileType,
+                    transferStatus: "in_progress",
+                    transferMethod: session.transferMethod,
+                    createdAt: session.createdAt,
+                    filePath: session.storagePath,
+                };
+                transfer.transferStatus = "completed";
+                transfer.completedAt = nowIso();
+                transfer.filePath = session.storagePath;
+                transfer.storageMode = "chunked";
+                transfer.uploadSessionId = session.id;
+                transfer.uploadTempDir = session.tempDir;
+                transfer.uploadChunkSize = session.chunkSize;
+                transfer.uploadTotalChunks = session.totalChunks;
+                transfer.uploadUploadedChunks = uploadedChunkIndices;
+                transfer.uploadUpdatedAt = nowIso();
+                currentDb.fileTransfers = [
+                    transfer,
+                    ...currentDb.fileTransfers.filter((entry) => entry.id !== transfer.id),
+                ];
+                await saveDb(currentDb);
+                await cleanupUploadSession(session);
+                return transfer;
             }
             const currentDb = await loadDb();
             const currentTransfer = currentDb.fileTransfers.find((entry) => entry.id === session.transferId && entry.userId === req.auth.userId);
@@ -1800,6 +1798,7 @@ app.post("/api/file-transfers/upload", uploadLimiter, requireAuth, requireCsrf, 
         createdAt: nowIso(),
         completedAt: nowIso(),
         filePath: storagePath, // Supabase Storage path
+        storageMode: "single",
     };
     db.fileTransfers.unshift(transfer);
     await saveDb(db);
@@ -1870,6 +1869,7 @@ app.post("/api/file-transfers", uploadLimiter, requireAuth, requireCsrf, async (
             createdAt: nowIso(),
             completedAt: nowIso(),
             filePath: storagePath,
+            storageMode: "single",
         };
         db.fileTransfers.unshift(transfer);
         await saveDb(db);
@@ -1906,19 +1906,55 @@ app.patch("/api/file-transfers/:id", syncLimiter, requireAuth, requireCsrf, asyn
             transfer.completedAt = nowIso();
         }
         if (req.body.transfer_status === "cancelled") {
-            const activeSession = findUploadSessionByTransferId(transfer.id, req.auth.userId);
+            const activeSession = await getActiveUploadSessionByTransferId(transfer.id, req.auth.userId);
             await cleanupUploadSession(activeSession);
-            await removeStoredTransferFile(transfer.filePath);
+            await removeStoredTransferArtifacts(transfer);
         }
     }
     await saveDb(db);
     res.json(transfer);
 });
-const getTransferDownloadLink = async (userId, transferId, action = "download") => {
+const writeResponseBuffer = async (res, buffer) => {
+    if (res.write(buffer)) {
+        return;
+    }
+    await new Promise((resolve) => {
+        res.once("drain", resolve);
+    });
+};
+const streamChunkedTransferDownload = async (res, transfer, action = "download") => {
+    if (!transfer.filePath || !transfer.uploadTotalChunks) {
+        throw new Error("Chunked transfer metadata is incomplete.");
+    }
+    res.status(200);
+    res.setHeader("Content-Type", sanitizeMimeType(transfer.fileType));
+    res.setHeader("Content-Disposition", `${action === "preview" ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(transfer.fileName)}`);
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Transfer-Mode", "chunked");
+    res.setHeader("Content-Length", String(transfer.fileSize));
+    for (let chunkIndex = 0; chunkIndex < transfer.uploadTotalChunks; chunkIndex += 1) {
+        const chunkPath = getChunkStoragePath(transfer.filePath, chunkIndex);
+        const { data, error } = await supabase.storage.from(FILE_BUCKET).download(chunkPath);
+        if (error || !data) {
+            throw new Error(`Could not read stored chunk ${chunkIndex + 1}.`);
+        }
+        const chunkBuffer = Buffer.from(await data.arrayBuffer());
+        await writeResponseBuffer(res, chunkBuffer);
+    }
+    res.end();
+};
+const getTransferDownloadLink = async (req, userId, transferId, action = "download") => {
     const db = await loadDb();
     const transfer = getOwnedTransfer(db, userId, transferId);
     if (!transfer?.filePath) {
         return { error: "File not found" };
+    }
+    if (transfer.storageMode === "chunked") {
+        const previewQuery = action === "preview" ? "?action=preview" : "";
+        return {
+            transfer,
+            signedUrl: `${getAppBaseUrl(req)}/api/file-transfers/${transfer.id}/download${previewQuery}`,
+        };
     }
     const { data, error } = await supabase.storage
         .from(FILE_BUCKET)
@@ -1935,7 +1971,7 @@ const getTransferDownloadLink = async (userId, transferId, action = "download") 
 app.get("/api/file-transfers/:id/download-link", fileListLimiter, requireAuth, async (req, res) => {
     const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const action = req.query.action === "preview" ? "preview" : "download";
-    const result = await getTransferDownloadLink(req.auth.userId, transferId, action);
+    const result = await getTransferDownloadLink(req, req.auth.userId, transferId, action);
     if ("error" in result) {
         res.status(result.error === "File not found" ? 404 : 500).json({ error: result.error });
         return;
@@ -1947,7 +1983,29 @@ app.get("/api/file-transfers/:id/download-link", fileListLimiter, requireAuth, a
 });
 app.get("/api/file-transfers/:id/download", fileListLimiter, requireAuth, async (req, res) => {
     const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const result = await getTransferDownloadLink(req.auth.userId, transferId);
+    const action = req.query.action === "preview" ? "preview" : "download";
+    const db = await loadDb();
+    const transfer = getOwnedTransfer(db, req.auth.userId, transferId);
+    if (!transfer?.filePath) {
+        res.status(404).json({ error: "File not found" });
+        return;
+    }
+    if (transfer.storageMode === "chunked") {
+        try {
+            await streamChunkedTransferDownload(res, transfer, action);
+        }
+        catch (error) {
+            console.error("Chunked transfer download error:", error);
+            if (!res.headersSent) {
+                res.status(500).json({ error: "Could not generate download link" });
+            }
+            else {
+                res.destroy();
+            }
+        }
+        return;
+    }
+    const result = await getTransferDownloadLink(req, req.auth.userId, transferId, action);
     if ("error" in result) {
         res.status(result.error === "File not found" ? 404 : 500).json({ error: result.error });
         return;
@@ -2198,9 +2256,9 @@ app.delete("/api/file-transfers/:id", syncLimiter, requireAuth, requireCsrf, asy
     const db = await loadDb();
     const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const transfer = getOwnedTransfer(db, req.auth.userId, transferId);
-    const activeSession = findUploadSessionByTransferId(transferId, req.auth.userId);
+    const activeSession = await getActiveUploadSessionByTransferId(transferId, req.auth.userId);
     await cleanupUploadSession(activeSession);
-    await removeStoredTransferFile(transfer?.filePath);
+    await removeStoredTransferArtifacts(transfer);
     db.fileTransfers = db.fileTransfers.filter((entry) => !(entry.id === transferId && entry.userId === req.auth.userId));
     await saveDb(db);
     res.status(204).send();
@@ -2298,6 +2356,7 @@ process.on("uncaughtException", (error) => {
     shutdown("uncaughtException");
 });
 ensureDataDirs()
+    .then(ensureConfiguredAdmin)
     .then(() => {
     server = app.listen(port, () => {
         logger.info({ port }, "UniLink API listening");

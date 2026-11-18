@@ -50,7 +50,7 @@ const getHeuristicApiBaseUrls = () => {
   }
 
   if (import.meta.env.DEV && !bases.size) {
-    bases.add("http://localhost:8787");
+    bases.add("http://localhost:22000");
   }
 
   return [...bases];

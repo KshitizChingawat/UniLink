@@ -1,7 +1,4 @@
-import cors from "cors";
 import express, { type Response } from "express";
-import helmet from "helmet";
-import rateLimit from "express-rate-limit";
 import { fileTypeFromBuffer } from "file-type";
 import { randomInt, randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
@@ -11,137 +8,22 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { z } from "zod";
 import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
-import { isEmailVerificationConfigured, isMailtrapDemoRestrictionError, sendRegistrationOtp } from "./mailer.js";
+import { isEmailVerificationConfigured, sendEmailOtp } from "./mailer.js";
 import { clearAuthCookies, comparePassword, createCsrfToken, hashPassword, requireAuth, requireCsrf, revokeToken, sanitizeUser, setAuthCookies, signAuthToken, signScopedToken, type AuthenticatedRequest } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
 import { containsNullBytes, ensureRelativeStoragePath, escapeHtml, isZipBombCandidate, nowIso, sanitizeFilename, sanitizeMimeType, sanitizeTextInput } from "./helpers.js";
 import { createId, ensureDataDirs, loadDb, saveDb } from "./storage.js";
 import type { AiSuggestionRecord, BluetoothDeviceRecord, ClipboardRecord, DeviceRecord, EmailVerificationRecord, FileTransferRecord, PairSessionRecord, UserRecord, VaultRecord } from "./types.js";
 import { appConfig } from "./config.js";
-import { createErrorHandler, HttpError, rejectDisallowedOrigin } from "./http.js";
-import { httpLogger, logger } from "./logger.js";
+import { createErrorHandler, HttpError } from "./http.js";
+import { logger } from "./logger.js";
+import { configureApp, rateLimits } from "./middleware/app.js";
+import { ensureConfiguredAdmin } from "./services/admin-bootstrap.js";
 const app = express();
 const port = appConfig.port;
-const nodeEnv = appConfig.nodeEnv;
 const isProduction = appConfig.isProduction;
-const allowedOrigins = appConfig.allowedOrigins;
-const supabaseOrigin = (() => {
-  const raw = appConfig.supabaseUrl || "";
-  if (!raw) return null;
-  try {
-    return new URL(raw).origin;
-  } catch {
-    return null;
-  }
-})();
-const supabaseStorageOrigin = (() => {
-  const raw = appConfig.supabaseUrl || "";
-  if (!raw) return null;
-  try {
-    return new URL(raw.replace(".supabase.co", ".storage.supabase.co")).origin;
-  } catch {
-    return null;
-  }
-})();
-
-const isTrustedProductionOrigin = (origin: string) => {
-  try {
-    const url = new URL(origin);
-    const hostname = url.hostname.toLowerCase();
-    return hostname.endsWith(".onrender.com") && hostname.includes("unilink");
-  } catch {
-    return false;
-  }
-};
-
-app.set("trust proxy", 1);
-app.disable("x-powered-by");
-app.use(httpLogger);
-
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin) {
-      callback(null, true);
-      return;
-    }
-
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-      return;
-    }
-
-    if (isProduction && isTrustedProductionOrigin(origin)) {
-      callback(null, true);
-      return;
-    }
-
-    callback(new Error("Origin not allowed by CORS"));
-  },
-  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "X-File-Name",
-    "X-File-Size",
-    "X-File-Type",
-    "X-Sender-Device-Id",
-    "X-Receiver-Device-Id",
-    "X-Transfer-Method",
-    "X-Upload-Id",
-    "X-Chunk-Index",
-    "X-Total-Chunks",
-    "X-CSRF-Token",
-  ],
-  exposedHeaders: ["Content-Disposition"],
-  credentials: true,
-  preflightContinue: false,
-  optionsSuccessStatus: 204,
-}));
-app.use(rejectDisallowedOrigin);
-const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 200,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Too many requests. Please slow down and try again." },
-});
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Too many authentication attempts. Please try again later." },
-});
-const tokenLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Too many token requests. Please try again later." },
-});
-const fileListLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 60,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Too many file listing requests. Please try again later." },
-});
-const syncLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 60,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Too many sync requests. Please try again later." },
-});
-const uploadLimiter = rateLimit({
-  // Chunked uploads legitimately create many requests, so keep abuse protection
-  // without throttling normal medium/large file transfers.
-  windowMs: 15 * 60 * 1000,
-  max: 1500,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Too many upload requests. Please wait before uploading again." },
-});
+configureApp(app);
+const { auth: authLimiter, token: tokenLimiter, fileList: fileListLimiter, sync: syncLimiter, upload: uploadLimiter } = rateLimits;
 const MAX_SINGLE_FILE_SIZE = appConfig.maxFileSizeBytes;
 const FREE_TOTAL_USER_STORAGE = 500 * 1024 * 1024;
 const PRO_TOTAL_USER_STORAGE = 100 * 1024 * 1024 * 1024;
@@ -154,61 +36,11 @@ const PRO_FILE_SIZE_LIMIT = Math.max(10 * 1024 * 1024 * 1024, MAX_SINGLE_FILE_SI
 // final response instead of lingering in a background processing state.
 const SYNC_COMPLETE_UPLOAD_LIMIT_BYTES = 256 * 1024 * 1024;
 const MONTH_IN_MS = 30 * 24 * 60 * 60 * 1000;
-const OTP_FALLBACK_ENABLED = appConfig.allowOtpFallback;
+const OTP_FALLBACK_ENABLED = !isProduction && appConfig.allowOtpFallback;
 const DEMO_GOOGLE_LOGIN_ENABLED = !isProduction && appConfig.allowDemoGoogleLogin;
-const strictContentSecurityPolicyDirectives = {
-  defaultSrc: ["'self'"],
-  scriptSrc: ["'self'"],
-  styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-  fontSrc: ["'self'", "https://fonts.gstatic.com"],
-  imgSrc: ["'self'", "data:", "blob:", "https://api.qrserver.com", ...(supabaseOrigin ? [supabaseOrigin] : []), ...(supabaseStorageOrigin ? [supabaseStorageOrigin] : [])],
-  mediaSrc: ["'self'", "blob:", ...(supabaseOrigin ? [supabaseOrigin] : []), ...(supabaseStorageOrigin ? [supabaseStorageOrigin] : [])],
-  connectSrc: ["'self'", ...allowedOrigins, ...(supabaseOrigin ? [supabaseOrigin] : []), ...(supabaseStorageOrigin ? [supabaseStorageOrigin] : [])],
-  objectSrc: ["'none'"],
-  baseUri: ["'self'"],
-  frameAncestors: ["'none'"],
-  formAction: ["'self'"],
-};
-
-app.use(
-  helmet({
-    crossOriginResourcePolicy: false,
-    contentSecurityPolicy: {
-      directives: strictContentSecurityPolicyDirectives,
-    },
-    hsts: isProduction
-      ? {
-          maxAge: 31536000,
-          includeSubDomains: true,
-          preload: true,
-        }
-      : false,
-    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
-    permittedCrossDomainPolicies: { permittedPolicies: "none" },
-  }),
-);
-app.use((_req, res, next) => {
-  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
-  res.setHeader("X-Frame-Options", "DENY");
-  res.setHeader("X-Content-Type-Options", "nosniff");
-  next();
-});
-app.use(globalLimiter);
-app.get("/admin", (req, res) => {
-  logger.warn({ ip: req.ip, userAgent: req.headers["user-agent"] }, "Honeypot route hit");
-  res.json({ status: "ok", system: "public", message: "No administrative access exposed." });
-});
-// Skip body parsing for the binary file upload route — it reads req stream directly
-app.use((req, res, next) => {
-  if (req.path === "/api/file-transfers/upload" || req.path === "/api/file-transfers/chunk") return next();
-  express.json({ limit: "2mb" })(req, res, next);
-});
-app.use((req, res, next) => {
-  if (req.path === "/api/file-transfers/upload" || req.path === "/api/file-transfers/chunk") return next();
-  express.urlencoded({ extended: true, limit: "2mb" })(req, res, next);
-});
 
 const registerSchema = z.object({
+  otp: z.string().regex(/^\d{6}$/),
   email: z.string().trim().email().max(120),
   password: z.string().min(8).max(128),
   firstName: z.string().trim().min(1).max(60),
@@ -928,6 +760,24 @@ app.get("/api/health", async (_req, res) => {
   }
 });
 
+async function issueEmailCode(db: Awaited<ReturnType<typeof loadDb>>, email: string, purpose: EmailVerificationRecord["purpose"]) {
+  const otp = createOtp();
+  consumeExpiredEmailVerifications(db);
+  db.emailVerifications = db.emailVerifications.filter(entry => entry.email !== email || entry.purpose !== purpose);
+  db.emailVerifications.unshift({
+    id: `${purpose}:${email}`, email, purpose, otpHash: await hashPassword(otp),
+    createdAt: nowIso(), expiresAt: new Date(Date.now() + 600000).toISOString(),
+  });
+  let response: { message: string; developmentOtp?: string } = { message: "Check your email for your six-digit code." };
+  if (!isEmailVerificationConfigured() && OTP_FALLBACK_ENABLED && purpose === "register") {
+    response = registrationOtpFallbackResponse("Local development verification code", otp);
+  } else {
+    await sendEmailOtp(email, otp, purpose);
+  }
+  await saveDb(db);
+  return response;
+}
+
 app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) => {
   const parsed = registrationOtpRequestSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -951,60 +801,8 @@ app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) =>
       return;
     }
 
-    const otp = createOtp();
-    const timestamp = nowIso();
-    const verification: EmailVerificationRecord = {
-      id: createId(),
-      email,
-      purpose: "register",
-      otpHash: await hashPassword(otp),
-      createdAt: timestamp,
-      expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-    };
-
-    db.emailVerifications = db.emailVerifications.filter(
-      (entry) => !(entry.email === email && entry.purpose === "register"),
-    );
-    db.emailVerifications.unshift(verification);
-    await saveDb(db);
-
-    if (!isEmailVerificationConfigured()) {
-      if (OTP_FALLBACK_ENABLED) {
-        res.json(
-          registrationOtpFallbackResponse(
-            "Email delivery is not configured right now. Use the temporary OTP shown below to continue signup.",
-            otp,
-          ),
-        );
-        return;
-      }
-
-      res.status(503).json({
-        error: "Email verification is not configured yet. Add SMTP settings on the server first.",
-      });
-      return;
-    }
-
-    try {
-      await sendRegistrationOtp(email, otp);
-
-      res.json({
-        success: true,
-        message: "Verification code sent to your email.",
-      });
-      return;
-    } catch (mailError) {
-      if (OTP_FALLBACK_ENABLED) {
-        const fallbackMessage = isMailtrapDemoRestrictionError(mailError)
-          ? "Email delivery is in testing mode. Use the temporary OTP shown below."
-          : "Email delivery is temporarily unavailable. Use the temporary OTP shown below to continue signup.";
-
-        res.json(registrationOtpFallbackResponse(fallbackMessage, otp));
-        return;
-      }
-
-      throw mailError;
-    }
+    const response = await issueEmailCode(db, email, "register");
+    res.json(response);
   } catch (error) {
     console.error("Registration OTP error:", error);
     res.status(500).json({ error: "Failed to send the verification code. Please try again." });
@@ -1071,13 +869,13 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
   try {
     const db = await loadDb();
     consumeExpiredEmailVerifications(db);
-    if (db.users.some((user) => user.email === email)) {
-      res.json({ error: "Email is already registered", duplicateEmail: true });
+    if (db.users.some((user) => normalizeEmail(user.email) === email)) {
+      res.status(409).json({ error: "Email is already registered", duplicateEmail: true });
       return;
     }
 
     const verification = getLatestEmailVerification(db, email);
-    if (!isEmailVerificationValid(verification)) {
+    if (!verification || !isEmailVerificationValid(verification) || !(await comparePassword(parsed.data.otp, verification.otpHash))) {
       res.status(400).json({ error: "Verify your email with the OTP before creating the account." });
       return;
     }
@@ -1241,15 +1039,43 @@ app.post("/api/auth/forgot-password", authLimiter, async (req, res) => {
     const db = await loadDb();
     const user = db.users.find((entry) => normalizeEmail(entry.email) === email);
 
-    res.json({
-      success: true,
-      message: user
-        ? "Password reset support has been initiated for this account."
-        : "If an account exists for this email, password reset support has been initiated.",
-    });
+    if (!isEmailVerificationConfigured()) {
+      res.status(503).json({ error: "Recovery email is unavailable. Please try again later." });
+      return;
+    }
+    if (user) await issueEmailCode(db, email, "reset");
+    res.json({ message: "If this email has an account, a reset code is on its way." });
   } catch (error) {
-    console.error("Forgot password lookup error:", error);
-    res.status(500).json({ error: "Unable to start password reset support right now." });
+    console.error("Recovery email error:", error);
+    res.status(503).json({ error: "Unable to send a recovery email right now." });
+  }
+});
+
+const resetSchema = registrationOtpVerifySchema.extend({ password: registerSchema.shape.password });
+app.post("/api/auth/reset-password", authLimiter, async (req, res) => {
+  const parsed = resetSchema.safeParse(req.body);
+  if (!parsed.success || !isStrongPassword(parsed.data.password)) {
+    res.status(400).json({ error: "Enter the six-digit code and a password with at least eight characters and a symbol." });
+    return;
+  }
+  try {
+    const email = normalizeEmail(parsed.data.email);
+    const db = await loadDb();
+    consumeExpiredEmailVerifications(db);
+    const code = db.emailVerifications.find(entry => entry.email === email && entry.purpose === "reset");
+    const user = db.users.find(entry => normalizeEmail(entry.email) === email);
+    if (!user || !code || !(await comparePassword(parsed.data.otp, code.otpHash))) {
+      res.status(400).json({ error: "Invalid or expired code. Check your email or request another code." });
+      return;
+    }
+    user.passwordHash = await hashPassword(parsed.data.password);
+    user.updatedAt = nowIso();
+    db.emailVerifications = db.emailVerifications.filter(entry => entry.id !== code.id);
+    await saveDb(db);
+    res.json({ message: "Password updated. Sign in with your new password." });
+  } catch (error) {
+    console.error("Password reset error:", error);
+    res.status(503).json({ error: "Unable to update the password. Please try again." });
   }
 });
 
@@ -3060,6 +2886,7 @@ process.on("uncaughtException", (error) => {
 });
 
 ensureDataDirs()
+  .then(ensureConfiguredAdmin)
   .then(() => {
     server = app.listen(port, () => {
       logger.info({ port }, "UniLink API listening");

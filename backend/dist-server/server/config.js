@@ -5,9 +5,12 @@ const parseOrigins = (value) => value
     .filter(Boolean);
 const envSchema = z.object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-    PORT: z.coerce.number().int().positive().default(8787),
+    PORT: z.coerce.number().int().positive().default(22000),
     SUPABASE_URL: z.string().url(),
-    SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+    SUPABASE_SERVICE_ROLE_KEY: z
+        .string()
+        .min(1)
+        .refine((value) => !/replace_with|your-service-role|<get from supabase/i.test(value), "SUPABASE_SERVICE_ROLE_KEY must be the real Supabase service_role key, not a placeholder."),
     JWT_SECRET: z.string().min(32),
     JWT_EXPIRES_IN: z.string().default("30m"),
     JWT_REMEMBER_ME_EXPIRES_IN: z.string().default("7d"),
@@ -20,11 +23,21 @@ const envSchema = z.object({
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
     ALLOW_OTP_FALLBACK: z.enum(["true", "false"]).default("true"),
     ALLOW_DEMO_GOOGLE_LOGIN: z.enum(["true", "false"]).default("false"),
+    ADMIN_EMAIL: z.string().trim().email().optional(),
+    ADMIN_PASSWORD: z.string().min(8).max(128).optional(),
     SMTP_HOST: z.string().optional(),
     SMTP_PORT: z.string().optional(),
     SMTP_USER: z.string().optional(),
     SMTP_PASS: z.string().optional(),
     SMTP_FROM: z.string().optional(),
+}).superRefine((value, context) => {
+    if (Boolean(value.ADMIN_EMAIL) !== Boolean(value.ADMIN_PASSWORD)) {
+        context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "ADMIN_EMAIL and ADMIN_PASSWORD must be configured together.",
+            path: ["ADMIN_EMAIL"],
+        });
+    }
 });
 const envResult = envSchema.safeParse(process.env);
 if (!envResult.success) {
@@ -56,6 +69,8 @@ export const appConfig = {
     logLevel: parsed.LOG_LEVEL,
     allowOtpFallback: parsed.ALLOW_OTP_FALLBACK === "true",
     allowDemoGoogleLogin: parsed.ALLOW_DEMO_GOOGLE_LOGIN === "true",
+    adminEmail: parsed.ADMIN_EMAIL,
+    adminPassword: parsed.ADMIN_PASSWORD,
     smtp: {
         host: parsed.SMTP_HOST,
         port: parsed.SMTP_PORT,

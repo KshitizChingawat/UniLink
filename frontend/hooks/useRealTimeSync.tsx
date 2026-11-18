@@ -3,7 +3,6 @@ import { BASE_URL } from '@/lib/api';
 import { useAuth } from './useAuth';
 import { useDevices } from './useDevices';
 import { toast } from 'sonner';
-import { BASE_URL } from '@/lib/api';
 
 interface SyncEvent {
   type: string;

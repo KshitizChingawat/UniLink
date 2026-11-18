@@ -46,72 +46,79 @@ export const createId = () => randomUUID();
 const readDb = async () => {
     const { data, error } = await supabase.storage
         .from(DB_BUCKET)
-        .download(DB_OBJECT_PATH);
-    if (error)
-        return null;
+        .download(DB_OBJECT_PATH, {}, { cache: "no-store" });
+    if (error) {
+        if (/^(object not found|the resource was not found)$/i.test(error.message))
+            return null;
+        throw new Error(`Failed to load account storage: ${error.message}`);
+    }
     return data.text();
 };
 const writeDb = async (json) => {
     const buffer = Buffer.from(json, "utf8");
     const { error } = await supabase.storage
         .from(DB_BUCKET)
-        .upload(DB_OBJECT_PATH, buffer, { contentType: "application/json", upsert: true });
+        .upload(DB_OBJECT_PATH, buffer, { contentType: "application/json", cacheControl: "0", upsert: true });
     if (error)
         throw new Error(`Failed to save database: ${error.message}`);
 };
-const sortByCreatedAt = (records) => [...records].sort((left, right) => {
-    const leftTime = left.createdAt ? Date.parse(left.createdAt) : 0;
-    const rightTime = right.createdAt ? Date.parse(right.createdAt) : 0;
-    return leftTime - rightTime;
-});
-const mergeById = (remote, local) => {
-    const merged = new Map();
-    for (const record of remote)
-        merged.set(record.id, record);
-    for (const record of local)
-        merged.set(record.id, record);
-    return [...merged.values()];
-};
-const mergeUsers = (remote, local) => {
-    const byId = mergeById(remote.map((user) => normalizeUser(user)), local.map((user) => normalizeUser(user)));
-    const byEmail = new Map();
-    for (const user of byId) {
-        byEmail.set(user.email.toLowerCase(), user);
-    }
-    return sortByCreatedAt([...byEmail.values()]);
-};
-const mergeDb = (remote, local) => ({
-    users: mergeUsers(remote.users, local.users),
-    devices: sortByCreatedAt(mergeById(remote.devices, local.devices)),
-    clipboard: sortByCreatedAt(mergeById(remote.clipboard, local.clipboard)),
-    fileTransfers: sortByCreatedAt(mergeById(remote.fileTransfers, local.fileTransfers)),
-    vault: sortByCreatedAt(mergeById(remote.vault, local.vault)),
-    aiSuggestions: sortByCreatedAt(mergeById(remote.aiSuggestions, local.aiSuggestions)),
-    bluetoothDevices: sortByCreatedAt(mergeById(remote.bluetoothDevices, local.bluetoothDevices)),
-    pairSessions: sortByCreatedAt(mergeById(remote.pairSessions, local.pairSessions)),
-    emailVerifications: sortByCreatedAt(mergeById(remote.emailVerifications, local.emailVerifications)),
-});
+// Each caller edits an isolated snapshot. Apply only its changes under the
+// process write lock so unrelated dashboard requests cannot roll back accounts.
+const baselines = new WeakMap();
+async function currentDatabase() {
+    const raw = await readDb();
+    if (raw === null)
+        return normalizeDb(null);
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.users))
+        throw new Error("Invalid account database");
+    return normalizeDb(parsed);
+}
 export const loadDb = async () => {
-    try {
-        const raw = await readDb();
-        return normalizeDb(raw ? JSON.parse(raw) : null);
-    }
-    catch {
-        const nextDb = { ...initialDb };
-        await writeDb(JSON.stringify(nextDb, null, 2));
-        return nextDb;
-    }
+    await writeLock.catch(() => undefined);
+    const base = await currentDatabase();
+    const snapshot = structuredClone(base);
+    baselines.set(snapshot, base);
+    return snapshot;
 };
+function mergeChanges(before, edited, latest) {
+    const original = new Map(before.map(row => [row.id, row]));
+    const updated = new Map(edited.map(row => [row.id, row]));
+    const merged = new Map(latest.map(row => [row.id, row]));
+    for (const id of new Set([...original.keys(), ...updated.keys()])) {
+        const prior = JSON.stringify(original.get(id));
+        const next = updated.get(id);
+        if (prior === JSON.stringify(next))
+            continue;
+        if (prior !== JSON.stringify(merged.get(id)))
+            throw new Error("Concurrent update. Please retry.");
+        if (next)
+            merged.set(id, structuredClone(next));
+        else
+            merged.delete(id);
+    }
+    return [...merged.values()];
+}
 export const saveDb = async (db) => {
-    // Chain writes so they never run in parallel
-    writeLock = writeLock
-        .catch(() => undefined)
-        .then(async () => {
-        // Persist the caller's normalized snapshot directly. The write lock
-        // already serializes mutations, and merging by id here causes deleted
-        // records such as file transfers to be resurrected on the next save.
-        const normalizedDb = normalizeDb(db);
-        await writeDb(JSON.stringify(normalizedDb, null, 2));
+    const base = baselines.get(db);
+    if (!base)
+        throw new Error("Unknown database snapshot");
+    writeLock = writeLock.catch(() => undefined).then(async () => {
+        const latest = await currentDatabase();
+        const merge = (key) => mergeChanges(base[key], db[key], latest[key]);
+        const merged = Object.fromEntries(Object.keys(latest).map(key => [key, merge(key)]));
+        const owners = new Map(latest.users.map(user => [user.email.trim().toLowerCase(), user.id]));
+        const priorEmails = new Map(base.users.map(user => [user.id, user.email]));
+        for (const user of merged.users) {
+            const email = user.email.trim().toLowerCase();
+            if (priorEmails.get(user.id) !== user.email &&
+                owners.has(email) && owners.get(email) !== user.id) {
+                throw new Error("Email already registered");
+            }
+            owners.set(email, user.id);
+        }
+        await writeDb(JSON.stringify(merged));
+        baselines.set(db, structuredClone(db));
     });
     await writeLock;
 };

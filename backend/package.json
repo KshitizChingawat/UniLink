@@ -4,9 +4,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch server/index.ts",
+    "dev": "tsx watch --env-file=.env server/index.ts",
     "build": "tsc -p tsconfig.server.json",
-    "start": "cross-env NODE_ENV=production node dist-server/server/index.js"
+    "start": "cross-env NODE_ENV=production node --env-file-if-exists=.env dist-server/server/index.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.4",
