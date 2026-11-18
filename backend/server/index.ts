@@ -969,13 +969,13 @@ async function issueEmailCode(db: Awaited<ReturnType<typeof loadDb>>, email: str
     id: `${purpose}:${email}`, email, purpose, otpHash: await hashPassword(otp),
     createdAt: nowIso(), expiresAt: new Date(Date.now() + 600000).toISOString(),
   });
+  await saveDb(db);
   let response: { message: string; developmentOtp?: string } = { message: "Check your email for your six-digit code." };
   if (!isEmailVerificationConfigured() && OTP_FALLBACK_ENABLED && purpose === "register") {
     response = registrationOtpFallbackResponse("Local development verification code", otp);
   } else {
     await sendEmailOtp(email, otp, purpose);
   }
-  await saveDb(db);
   return response;
 }
 

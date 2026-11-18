@@ -67,7 +67,7 @@ const AnimatedToggle = ({
 
   return (
     <div className={cn('flex flex-col items-center justify-center gap-4', className)}>
-      <div className="relative flex items-center justify-center">
+      <div className="relative flex w-full max-w-fit items-center justify-center">
         <div
           className={cn(
             'pointer-events-none absolute inset-x-3 top-1/2 h-28 -translate-y-1/2 rounded-full blur-2xl transition-all duration-700',
@@ -164,7 +164,7 @@ const AnimatedToggle = ({
           )}
         </button>
 
-        <div className="relative mx-3 h-9 w-28 overflow-hidden rounded-full border border-white/70 bg-white/55 shadow-[inset_0_1px_2px_rgba(15,23,42,0.1),0_12px_28px_rgba(15,23,42,0.08)] backdrop-blur-md sm:w-32">
+        <div className="relative mx-2 min-w-0 sm:mx-3 h-9 w-28 overflow-hidden rounded-full border border-white/70 bg-white/55 shadow-[inset_0_1px_2px_rgba(15,23,42,0.1),0_12px_28px_rgba(15,23,42,0.08)] backdrop-blur-md sm:w-32">
           <div className="absolute inset-x-3 top-1/2 h-2.5 -translate-y-1/2 rounded-full bg-slate-200/95 shadow-[inset_0_1px_3px_rgba(15,23,42,0.16)]" />
           <div className="absolute inset-x-3 top-1/2 h-2.5 -translate-y-1/2 rounded-full bg-[linear-gradient(180deg,rgba(255,255,255,0.85),rgba(255,255,255,0))]" />
           <div

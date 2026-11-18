@@ -750,6 +750,7 @@ async function issueEmailCode(db, email, purpose) {
         id: `${purpose}:${email}`, email, purpose, otpHash: await hashPassword(otp),
         createdAt: nowIso(), expiresAt: new Date(Date.now() + 600000).toISOString(),
     });
+    await saveDb(db);
     let response = { message: "Check your email for your six-digit code." };
     if (!isEmailVerificationConfigured() && OTP_FALLBACK_ENABLED && purpose === "register") {
         response = registrationOtpFallbackResponse("Local development verification code", otp);
@@ -757,7 +758,6 @@ async function issueEmailCode(db, email, purpose) {
     else {
         await sendEmailOtp(email, otp, purpose);
     }
-    await saveDb(db);
     return response;
 }
 app.get("/api/auth/email-status", (_req, res) => {

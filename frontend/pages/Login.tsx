@@ -247,7 +247,7 @@ const Login = () => {
                 readyLabel="Tap the left module to sign in"
                 successLabel="UniLink connected. Logging you in..."
                 onActivate={performLogin}
-                className="gap-2 scale-[0.9] sm:gap-2.5 sm:scale-[0.97]"
+                className="mx-auto w-full gap-2 sm:gap-2.5"
               />
             </div>
             <button type="submit" className="sr-only focus:not-sr-only focus:text-white" disabled={loading}>Sign in</button>
@@ -288,7 +288,7 @@ const Login = () => {
                   className="mt-1"
                 />
               </div>
-              <DialogFooter>
+              <DialogFooter className="grid grid-cols-2 gap-2 sm:flex sm:justify-end sm:space-x-0">
                 <Button type="button" variant="outline" onClick={() => setForgotOpen(false)}>
                   Cancel
                 </Button>
@@ -373,7 +373,7 @@ const Login = () => {
                   </div>
                 </div>
               </div>
-              <DialogFooter>
+              <DialogFooter className="grid grid-cols-2 gap-2 sm:flex sm:justify-end sm:space-x-0">
                 <Button type="button" variant="outline" onClick={() => setForgotStep('email')}>
                   Back
                 </Button>

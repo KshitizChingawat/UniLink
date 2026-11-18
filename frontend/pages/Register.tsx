@@ -128,18 +128,13 @@ const Register = () => {
       return;
     }
 
-    setOtpSent(false);
-    setOtpVerified(false);
     setSendingOtp(true);
+    setOtpVerified(false);
+    setOtpCode('');
+    setDevelopmentOtp('');
     const result = await requestRegistrationOtp(formData.email);
     setSendingOtp(false);
-    if (result.error) {
-      setOtpSent(false);
-      setOtpVerified(false);
-      setDevelopmentOtp('');
-      setOtpDeliveryMode(null);
-      return;
-    }
+    if (result.error) return;
     setOtpSent(true);
     setDevelopmentOtp(result.developmentOtp || '');
     setOtpDeliveryMode(result.deliveryMode || 'email');
@@ -160,13 +155,9 @@ const Register = () => {
   };
 
   return (
-    <div className="relative flex min-h-[100dvh] justify-center overflow-x-hidden overflow-y-auto bg-gradient-to-br from-unilink-600 via-blue-600 to-purple-600 px-3 py-5 dark:from-slate-950 dark:via-slate-900 dark:to-slate-800 sm:px-4 sm:py-8">
-      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+    <div className="relative isolate flex min-h-[100dvh] justify-center overflow-x-hidden overflow-y-auto bg-gradient-to-br from-unilink-600 via-blue-600 to-purple-600 px-3 py-5 dark:from-slate-950 dark:via-slate-900 dark:to-slate-800 sm:px-4 sm:py-8">
+      <div className="pointer-events-none fixed inset-0 overflow-hidden bg-[radial-gradient(ellipse_at_20%_35%,#18345a,transparent_55%),radial-gradient(ellipse_at_86%_64%,#332354,transparent_52%),linear-gradient(155deg,#071323,#101a32)]">
         <GenerativeArtSceneV3 />
-        <div className="absolute left-[8%] top-[12%] h-40 w-40 rounded-full bg-white/10 blur-2xl animate-float" />
-        <div className="absolute right-[10%] top-[20%] h-56 w-56 rounded-full bg-cyan-300/20 blur-3xl animate-pulse-glow" />
-        <div className="absolute bottom-[12%] left-[16%] h-48 w-48 rounded-full bg-indigo-200/20 blur-3xl animate-float" style={{ animationDelay: '1.4s' }} />
-        <div className="absolute bottom-[8%] right-[14%] h-44 w-44 rounded-full bg-white/10 blur-2xl animate-pulse-glow" style={{ animationDelay: '2.1s' }} />
       </div>
       <div className="relative z-10 flex w-full max-w-md items-start justify-center">
         {/* Register Card */}
@@ -241,7 +232,7 @@ const Register = () => {
                   <div className="mt-2 flex gap-2">
                     <Input
                       id="otpCode"
-                      disabled={verifyingOtp || loading}
+                      disabled={sendingOtp || verifyingOtp || loading}
                       type="text"
                       autoComplete="one-time-code"
                       inputMode="numeric"
@@ -256,9 +247,9 @@ const Register = () => {
                     <Button
                       type="button"
                       onClick={handleVerifyOtp}
-                      disabled={verifyingOtp || otpCode.trim().length !== 6}
+                      disabled={sendingOtp || otpVerified || verifyingOtp || otpCode.trim().length !== 6}
                     >
-                      {verifyingOtp ? 'Verifying...' : 'Verify'}
+                      {verifyingOtp ? 'Verifying...' : otpVerified ? 'Verified' : 'Verify'}
                     </Button>
                   </div>
                   <p className={`mt-2 text-sm ${otpVerified ? 'text-green-600' : 'text-slate-600'}`}>

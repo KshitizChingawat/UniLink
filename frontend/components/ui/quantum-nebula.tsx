@@ -29,7 +29,8 @@ const fragmentShader = `
   void main() {
     float radius = length(gl_PointCoord - 0.5) * 2.0;
     float halo = exp(-4.0 * radius * radius) * (1.0 - smoothstep(0.72, 1.0, radius));
-    gl_FragColor = vec4(starColor, halo * intensity);
+    float core = exp(-18.0 * radius * radius);
+    gl_FragColor = vec4(mix(starColor, vec3(0.91, 0.96, 1.0), core * 0.42), halo * intensity);
   }`;
 
 export default function GenerativeArtSceneV3() {
