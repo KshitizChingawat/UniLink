@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import type { AppDatabase, UserRecord } from "./types.js";
 import { supabase, DB_BUCKET } from "./supabase.js";
@@ -47,8 +48,29 @@ const normalizeDb = (raw: Partial<AppDatabase> | null | undefined): AppDatabase 
   emailVerifications: raw?.emailVerifications || [],
 });
 
-// no-op: kept so index.ts startup doesn't need to change
-export const ensureDataDirs = async () => {};
+// Earlier deployments could accept signups into a host-local journal.
+export const ensureDataDirs = async () => {
+  const locations = ["../../server/data/db.json", "./data/db.json"];
+  for (const location of locations) {
+    let raw: string;
+    try {
+      raw = await readFile(new URL(location, import.meta.url), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    const legacy = JSON.parse(raw) as Partial<AppDatabase>;
+    if (!Array.isArray(legacy.users)) throw new Error("Invalid local account journal");
+    const db = await loadDb();
+    const ids = new Set(db.users.map(user => user.id));
+    const emails = new Set(db.users.map(user => user.email.trim().toLowerCase()));
+    const missing = legacy.users.filter(user => !ids.has(user.id) && !emails.has(user.email.trim().toLowerCase()));
+    if (missing.length) {
+      db.users.push(...missing.map(normalizeUser));
+      await saveDb(db);
+    }
+  }
+};
 
 export const createId = () => randomUUID();
 

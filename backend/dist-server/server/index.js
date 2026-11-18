@@ -1,17 +1,16 @@
 import express from "express";
 import { fileTypeFromBuffer } from "file-type";
 import { randomInt, randomUUID } from "node:crypto";
-import { createWriteStream } from "node:fs";
-import { mkdir, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
 import { z } from "zod";
 import { supabase, FILE_BUCKET, SESSION_BUCKET } from "./supabase.js";
-import { isEmailVerificationConfigured, sendEmailOtp } from "./mailer.js";
-import { clearAuthCookies, comparePassword, createCsrfToken, hashPassword, requireAuth, requireCsrf, revokeToken, sanitizeUser, setAuthCookies, signAuthToken } from "./auth.js";
+import { getEmailProvider, isEmailVerificationConfigured, sendEmailOtp } from "./mailer.js";
+import { clearAuthCookies, comparePassword, createCsrfToken, hashPassword, requireAuth, requireCsrf, revokeToken, sanitizeUser, setAuthCookies, signAuthToken, signScopedToken, verifyScopedToken } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
-import { ensureRelativeStoragePath, isZipBombCandidate, nowIso, sanitizeFilename, sanitizeMimeType, sanitizeTextInput } from "./helpers.js";
+import { ensureRelativeStoragePath, isZipBombCandidate, nowIso, parseRangeHeader, planChunkedByteRange, sanitizeFilename, sanitizeMimeType, sanitizeTextInput } from "./helpers.js";
 import { createId, ensureDataDirs, loadDb, saveDb } from "./storage.js";
 import { appConfig } from "./config.js";
 import { createErrorHandler } from "./http.js";
@@ -22,7 +21,7 @@ const app = express();
 const port = appConfig.port;
 const isProduction = appConfig.isProduction;
 configureApp(app);
-const { auth: authLimiter, token: tokenLimiter, fileList: fileListLimiter, sync: syncLimiter, upload: uploadLimiter } = rateLimits;
+const { auth: authLimiter, token: tokenLimiter, refresh: refreshLimiter, fileList: fileListLimiter, sync: syncLimiter, upload: uploadLimiter } = rateLimits;
 const MAX_SINGLE_FILE_SIZE = appConfig.maxFileSizeBytes;
 const FREE_TOTAL_USER_STORAGE = 500 * 1024 * 1024;
 const PRO_TOTAL_USER_STORAGE = 100 * 1024 * 1024 * 1024;
@@ -160,7 +159,17 @@ const uploadChunkHeadersSchema = z.object({
     "x-total-chunks": z.coerce.number().int().min(1),
 });
 const uploadSessions = new Map();
-const LARGE_UPLOAD_CHUNK_BYTES = 50 * 1024 * 1024;
+// 8 MB chunks keep every hop fast: the browser uploads 6+ in parallel, each
+// Supabase PUT stays small (quick TTFB, cheap retries), per-chunk RAM is tiny,
+// and downloads/previews can start after fetching a single small chunk.
+const LARGE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+// Chunks to fetch ahead while streaming a chunked download. Supabase requests
+// run concurrently while bytes are written to the client in order, so the
+// download is limited by bandwidth instead of one-chunk-at-a-time latency.
+const CHUNK_DOWNLOAD_CONCURRENCY = 6;
+// Minimum gap between full-database progress rewrites for an active upload.
+// Progress is authoritative in memory; the DB copy only aids crash recovery.
+const CHUNK_PROGRESS_PERSIST_INTERVAL_MS = 15_000;
 const UPLOAD_TEMP_ROOT = path.join(os.tmpdir(), "unilink-upload-sessions");
 const UPLOAD_SESSION_STALE_MS = 30 * 60 * 1000;
 const UPLOAD_REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
@@ -200,11 +209,14 @@ const assertValidEmailAddress = (email) => {
     }
     return null;
 };
+// Crypto-secure 6-digit code. Called fresh on EVERY request-otp call, and the
+// handler below deletes any previous pending code for that email first, so each
+// attempt yields a unique, single-use OTP valid for 10 minutes.
 const createOtp = () => `${randomInt(100000, 1000000)}`;
 const isStrongPassword = (password) => password.length >= 8 && /[^A-Za-z0-9]/.test(password);
 const isValidMobileNumber = (mobileNumber) => /^\+\d{1,3}\s\d{4}-\d{6}$/.test(mobileNumber.trim());
-const getLatestEmailVerification = (db, email) => db.emailVerifications
-    .filter((entry) => entry.email === email && entry.purpose === "register")
+const getLatestEmailVerification = (db, email, purpose = "register") => db.emailVerifications
+    .filter((entry) => entry.email === email && entry.purpose === purpose)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] || null;
 const isEmailVerificationValid = (verification) => Boolean(verification &&
     verification.verifiedAt &&
@@ -349,19 +361,84 @@ const parseUploadChunkHeaders = (headers) => uploadChunkHeadersSchema.safeParse(
     "x-total-chunks": headers["x-total-chunks"],
 });
 const getOwnedTransfer = (db, userId, transferId) => db.fileTransfers.find((entry) => entry.id === transferId && entry.userId === userId) || null;
-const getUploadChunkPath = (session, chunkIndex) => path.join(session.tempDir, `${String(chunkIndex).padStart(6, "0")}.part`);
+// Media elements, anchor navigations, and cross-site deployments cannot send
+// the Bearer token stored in localStorage. Chunked downloads therefore use a
+// short-lived, transfer-scoped token in the URL, with normal cookie/Bearer auth
+// as the fallback for direct API calls.
+const requireDownloadAccess = async (req, res, next) => {
+    const rawToken = req.query.token;
+    const downloadToken = typeof rawToken === "string" ? rawToken : Array.isArray(rawToken) ? String(rawToken[0]) : "";
+    if (!downloadToken) {
+        await requireAuth(req, res, next);
+        return;
+    }
+    try {
+        const payload = await verifyScopedToken(downloadToken, "download");
+        const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+        if (!transferId || String(payload.fileId) !== transferId || typeof payload.sub !== "string") {
+            throw new Error("Invalid download token");
+        }
+        req.auth = {
+            userId: payload.sub,
+            role: payload.role === "admin" ? "admin" : "user",
+            jti: String(payload.jti),
+        };
+        next();
+    }
+    catch {
+        res.status(401).json({ error: "Unauthorized" });
+    }
+};
+const listStoredChunkIndices = async (session) => {
+    const chunkIndices = new Set();
+    const prefix = `${session.storagePath}/chunks`;
+    // 100 is the documented/default Supabase Storage page size, so a server that
+    // silently caps a larger requested limit cannot truncate the listing after
+    // the first page (which would force already-uploaded chunks to be resent).
+    const pageSize = 100;
+    for (let offset = 0; offset < session.totalChunks; offset += pageSize) {
+        try {
+            const { data, error } = await supabase.storage.from(FILE_BUCKET).list(prefix, {
+                limit: pageSize,
+                offset,
+                sortBy: { column: "name", order: "asc" },
+            });
+            if (error || !data?.length)
+                break;
+            for (const entry of data) {
+                const match = /^(\d+)\.part$/.exec(entry.name);
+                if (!match)
+                    continue;
+                const chunkIndex = Number.parseInt(match[1], 10);
+                if (Number.isInteger(chunkIndex) && chunkIndex >= 0 && chunkIndex < session.totalChunks) {
+                    chunkIndices.add(chunkIndex);
+                }
+            }
+            if (data.length < pageSize)
+                break;
+        }
+        catch (error) {
+            // Resume is best-effort. If storage cannot be listed, fall back to the
+            // progress already persisted in the database rather than failing the
+            // whole upload/status request.
+            console.error("Could not list stored upload chunks:", error);
+            break;
+        }
+    }
+    return Array.from(chunkIndices).sort((a, b) => a - b);
+};
 const getUploadedChunkIndices = async (session) => {
     if (session.uploadedChunks.size > 0) {
         return Array.from(session.uploadedChunks).sort((a, b) => a - b);
     }
-    const entries = await readdir(session.tempDir).catch(() => []);
-    const uploadedChunks = entries
-        .filter((entry) => entry.endsWith(".part"))
-        .map((entry) => Number.parseInt(entry.replace(".part", ""), 10))
-        .filter((value) => Number.isInteger(value) && value >= 0 && value < session.totalChunks)
-        .sort((a, b) => a - b);
-    session.uploadedChunks = new Set(uploadedChunks);
-    return uploadedChunks;
+    if (!session.hasScannedStorage) {
+        // The chunk payloads live in Supabase Storage, not on this host's ephemeral
+        // disk. Listing the folder is the only reliable way to resume after a
+        // restart/redeploy (the temp directory is gone and DB progress may lag).
+        session.uploadedChunks = new Set(await listStoredChunkIndices(session));
+        session.hasScannedStorage = true;
+    }
+    return Array.from(session.uploadedChunks).sort((a, b) => a - b);
 };
 const cleanupUploadSession = async (session) => {
     if (!session)
@@ -396,8 +473,11 @@ const createPendingUploadSession = async (transfer) => {
         uploadedChunks: new Set(transfer.uploadUploadedChunks || []),
         isDirectUpload: false,
     };
-    const uploadedChunks = await getUploadedChunkIndices(session);
-    session.uploadedChunks = new Set(uploadedChunks);
+    // Resume from the union of what the DB last persisted and what actually
+    // exists in storage, so a restart never forces a full re-upload.
+    const storedChunks = await listStoredChunkIndices(session);
+    session.uploadedChunks = new Set([...session.uploadedChunks, ...storedChunks]);
+    session.hasScannedStorage = true;
     uploadSessions.set(session.id, session);
     return session;
 };
@@ -433,8 +513,11 @@ const removeStoredTransferArtifacts = async (transfer) => {
     if (transfer.storageMode === "chunked") {
         const chunkTotal = transfer.uploadTotalChunks || 0;
         const chunkPaths = Array.from({ length: chunkTotal }, (_, index) => getChunkStoragePath(transfer.filePath, index));
-        if (chunkPaths.length > 0) {
-            const { error } = await supabase.storage.from(FILE_BUCKET).remove(chunkPaths);
+        // Supabase caps request payloads, and a 10 GB transfer is ~1280 chunks.
+        for (let offset = 0; offset < chunkPaths.length; offset += 100) {
+            const { error } = await supabase.storage
+                .from(FILE_BUCKET)
+                .remove(chunkPaths.slice(offset, offset + 100));
             if (error) {
                 console.error("Supabase Storage chunk delete error:", error);
             }
@@ -458,44 +541,109 @@ const removeStoredTransferFile = async (filePath) => {
         console.error("Supabase Storage delete error:", error);
     }
 };
-const cleanupStaleUploadSessions = async () => {
-    const cutoff = Date.now() - UPLOAD_SESSION_STALE_MS;
-    const staleSessions = Array.from(uploadSessions.values()).filter((session) => new Date(session.updatedAt || session.createdAt).getTime() < cutoff);
-    if (staleSessions.length === 0)
+// Progress is authoritative in the in-memory session; the database copy only
+// aids crash recovery, so refresh it at most every
+// CHUNK_PROGRESS_PERSIST_INTERVAL_MS. Without this, a 10 GB upload would pay a
+// full database download + rewrite for each of its ~1280 chunks.
+const persistChunkProgress = async (session, userId) => {
+    const now = Date.now();
+    if (session.lastPersistedAt &&
+        now - Date.parse(session.lastPersistedAt) < CHUNK_PROGRESS_PERSIST_INTERVAL_MS) {
         return;
-    const db = await loadDb();
-    let dbChanged = false;
-    for (const session of staleSessions) {
-        const transfer = db.fileTransfers.find((entry) => entry.id === session.transferId && entry.userId === session.userId);
-        if (transfer && transfer.transferStatus === "in_progress") {
-            transfer.transferStatus = "failed";
-            transfer.completedAt = nowIso();
-            dbChanged = true;
-        }
-        await cleanupUploadSession(session);
     }
-    if (dbChanged) {
+    session.lastPersistedAt = new Date(now).toISOString();
+    const db = await loadDb();
+    const transfer = db.fileTransfers.find((entry) => entry.id === session.transferId && entry.userId === userId);
+    if (transfer) {
+        transfer.uploadSessionId = session.id;
+        transfer.uploadTempDir = session.tempDir;
+        transfer.uploadChunkSize = session.chunkSize;
+        transfer.uploadTotalChunks = session.totalChunks;
+        transfer.uploadUploadedChunks = Array.from(session.uploadedChunks).sort((a, b) => a - b);
+        transfer.uploadUpdatedAt = session.updatedAt;
+        if (!transfer.storageMode) {
+            transfer.storageMode = "chunked";
+        }
         await saveDb(db);
     }
-    const persistedStaleTransfers = db.fileTransfers.filter((transfer) => transfer.transferStatus === "in_progress" &&
-        Boolean(transfer.uploadSessionId) &&
-        new Date(transfer.uploadUpdatedAt || transfer.createdAt).getTime() < cutoff);
-    if (persistedStaleTransfers.length === 0) {
+};
+// Abandoned chunk uploads are detected from the in-memory session map and from
+// the persisted transfer rows (the map is empty after a restart/redeploy). The
+// DB scan is throttled so a busy chunk upload does not re-read/rewrite the
+// whole database on every request.
+const STALE_UPLOAD_SCAN_INTERVAL_MS = 60_000;
+let lastStaleUploadScanAt = 0;
+const cleanupStaleUploadSessions = async () => {
+    const scanStartedAt = Date.now();
+    const cutoff = scanStartedAt - UPLOAD_SESSION_STALE_MS;
+    const staleSessions = Array.from(uploadSessions.values()).filter((session) => new Date(session.updatedAt || session.createdAt).getTime() < cutoff);
+    // Nothing stale is tracked in this process and we scanned recently, so skip
+    // the database round-trip. Crucially, do NOT return just because the map has
+    // no stale entries: after a restart the map is empty while the database can
+    // still hold uploads that stopped mid-transfer forever.
+    if (staleSessions.length === 0 &&
+        scanStartedAt - lastStaleUploadScanAt < STALE_UPLOAD_SCAN_INTERVAL_MS) {
         return;
     }
-    let persistedDbChanged = false;
+    lastStaleUploadScanAt = scanStartedAt;
+    // Collect the transfers that are genuinely abandoned, without holding a
+    // stale database snapshot across storage I/O.
+    const staleTransferIds = new Set();
+    for (const session of staleSessions) {
+        // A session can be stale only because its finalize request was lost: all
+        // chunks may already be in storage. Never destroy that payload; leave it
+        // in_progress so the dashboard recovery can finish it.
+        if (session.uploadedChunks.size < session.totalChunks) {
+            staleTransferIds.add(session.transferId);
+        }
+    }
+    const scanDb = await loadDb();
+    const persistedStaleTransfers = scanDb.fileTransfers.filter((transfer) => transfer.transferStatus === "in_progress" &&
+        Boolean(transfer.uploadSessionId) &&
+        new Date(transfer.uploadUpdatedAt || transfer.createdAt).getTime() < cutoff);
     for (const transfer of persistedStaleTransfers) {
-        const activeSession = transfer.uploadSessionId ? uploadSessions.get(transfer.uploadSessionId) : null;
+        if (staleTransferIds.has(transfer.id))
+            continue;
+        // Rebuild the session from storage before declaring the upload abandoned.
+        // If every chunk is present, the bytes are complete and only the finalize
+        // call was lost (closed tab/redeploy). Deleting those chunks would lose a
+        // file that can still be completed by the dashboard recovery.
+        const activeSession = await getActiveUploadSessionByTransferId(transfer.id, transfer.userId);
+        if (activeSession && activeSession.uploadedChunks.size >= activeSession.totalChunks) {
+            continue;
+        }
         if (activeSession) {
             await cleanupUploadSession(activeSession);
         }
-        await removeStoredTransferArtifacts(transfer);
+        staleTransferIds.add(transfer.id);
+    }
+    for (const session of staleSessions) {
+        if (session.uploadedChunks.size < session.totalChunks) {
+            await cleanupUploadSession(session);
+        }
+    }
+    if (staleTransferIds.size === 0) {
+        return;
+    }
+    // Re-read immediately before writing so a long storage check cannot clobber
+    // progress/completion saved by another request in the meantime.
+    const db = await loadDb();
+    const failedTransfers = [];
+    for (const transfer of db.fileTransfers) {
+        if (!staleTransferIds.has(transfer.id) || transfer.transferStatus !== "in_progress") {
+            continue;
+        }
         transfer.transferStatus = "failed";
         transfer.completedAt = nowIso();
-        persistedDbChanged = true;
+        transfer.uploadUploadedChunks = [];
+        failedTransfers.push(transfer);
     }
-    if (persistedDbChanged) {
-        await saveDb(db);
+    if (failedTransfers.length === 0) {
+        return;
+    }
+    await saveDb(db);
+    for (const transfer of failedTransfers) {
+        await removeStoredTransferArtifacts(transfer);
     }
 };
 const userResponse = (user) => {
@@ -548,6 +696,30 @@ const getAppBaseUrl = (req) => {
     const portFromHost = String(hostHeader).split(":")[1] || "5173";
     return `http://${lanAddress}:${portFromHost}`;
 };
+const firstHeaderValue = (value) => {
+    const raw = Array.isArray(value) ? value[0] : value;
+    return raw?.split(",")[0]?.trim() || "";
+};
+// Base URL of THIS API service. Never derive it from the Origin header: in a
+// split deployment the Origin is the frontend host, which made chunked
+// download/preview links point at the static frontend and 404.
+const getApiBaseUrl = (req) => {
+    const forwardedHost = firstHeaderValue(req.headers["x-forwarded-host"]);
+    const host = forwardedHost || firstHeaderValue(req.headers.host);
+    const protocol = firstHeaderValue(req.headers["x-forwarded-proto"]) || req.protocol || "http";
+    const hostname = host.replace(/:\d+$/, "").toLowerCase();
+    if (host &&
+        hostname !== "localhost" &&
+        hostname !== "127.0.0.1" &&
+        hostname !== "::1" &&
+        hostname !== "[::1]") {
+        return `${protocol}://${host}`;
+    }
+    // Local development: use the LAN address so other devices on the network can
+    // reach the API instead of resolving "localhost" to themselves.
+    const hostPort = host.split(":")[1] || String(port);
+    return `http://${getLanAddress()}:${hostPort}`;
+};
 const buildPairSession = (userId) => {
     const createdAt = nowIso();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
@@ -588,6 +760,9 @@ async function issueEmailCode(db, email, purpose) {
     await saveDb(db);
     return response;
 }
+app.get("/api/auth/email-status", (_req, res) => {
+    res.json({ emailConfigured: isEmailVerificationConfigured(), otpFallbackEnabled: OTP_FALLBACK_ENABLED, provider: getEmailProvider() });
+});
 app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) => {
     const parsed = registrationOtpRequestSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -894,6 +1069,26 @@ app.post("/api/auth/change-password", requireAuth, requireCsrf, async (req, res)
         console.error("Change password error:", error);
         res.status(500).json({ error: "Unable to change password right now." });
     }
+});
+app.post("/api/auth/refresh", refreshLimiter, requireAuth, requireCsrf, async (req, res) => {
+    const db = await loadDb();
+    const user = db.users.find((entry) => entry.id === req.auth.userId);
+    if (!user) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+    }
+    if (refreshUserPlan(user)) {
+        await saveDb(db);
+    }
+    const rememberMe = req.body?.rememberMe === true;
+    const { token } = signAuthToken(user, rememberMe);
+    const csrfToken = createCsrfToken();
+    setAuthCookies(res, token, csrfToken, rememberMe);
+    res.json({
+        token,
+        csrfToken,
+        user: userResponse(user),
+    });
 });
 app.post("/api/auth/request-2fa-otp", requireAuth, async (req, res) => {
     const parsed = twoFactorRequestSchema.safeParse(req.body);
@@ -1291,6 +1486,11 @@ app.delete("/api/clipboard/:id", syncLimiter, requireAuth, requireCsrf, async (r
     res.status(204).send();
 });
 app.get("/api/file-transfers", fileListLimiter, requireAuth, async (req, res) => {
+    // Dashboard polling is the one request every client makes continuously, so
+    // this is where an abandoned upload must be transitioned out of
+    // "in_progress"; otherwise the sender's UI shows a transfer that can never
+    // finish (especially after a page reload or server restart).
+    await cleanupStaleUploadSessions();
     const db = await loadDb();
     res.json(db.fileTransfers
         .filter((transfer) => transfer.userId === req.auth.userId)
@@ -1455,19 +1655,7 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
     const existingChunkIndices = await getUploadedChunkIndices(session);
     if (existingChunkIndices.includes(chunkIndex)) {
         session.updatedAt = nowIso();
-        const db = await loadDb();
-        const transfer = db.fileTransfers.find((entry) => entry.id === session.transferId && entry.userId === req.auth.userId);
-        if (transfer) {
-            transfer.uploadSessionId = session.id;
-            transfer.uploadTempDir = session.tempDir;
-            transfer.uploadChunkSize = session.chunkSize;
-            transfer.uploadTotalChunks = session.totalChunks;
-            transfer.uploadUpdatedAt = session.updatedAt;
-            if (!transfer.storageMode) {
-                transfer.storageMode = "chunked";
-            }
-            await saveDb(db);
-        }
+        await persistChunkProgress(session, req.auth.userId);
         res.status(200).json({
             uploadId: session.id,
             chunkIndex,
@@ -1477,35 +1665,41 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
         return;
     }
     session.updatedAt = nowIso();
-    const chunkPath = getUploadChunkPath(session, chunkIndex);
+    // Write the chunk straight into one preallocated buffer. This removes the
+    // array-of-slices + Buffer.concat copy from the critical path and keeps each
+    // in-flight chunk bounded to its declared size.
+    const received = Buffer.allocUnsafe(expectedChunkSize);
     let bytesWritten = 0;
+    let chunkTooLarge = false;
     try {
         await new Promise((resolve, reject) => {
-            const output = createWriteStream(chunkPath);
             let settled = false;
             const rejectOnce = (error) => {
                 if (settled)
                     return;
                 settled = true;
-                output.destroy(error);
                 reject(error);
             };
             req.on("data", (chunk) => {
-                bytesWritten += chunk.length;
-                if (bytesWritten > expectedChunkSize) {
-                    rejectOnce(new Error("Uploaded chunk exceeded the expected size."));
+                if (settled || chunkTooLarge)
+                    return;
+                if (bytesWritten + chunk.length > expectedChunkSize) {
+                    chunkTooLarge = true;
+                    // Discard the surplus and keep draining (never destroy the socket)
+                    // so the client still receives a clean 400 response below.
+                    return;
                 }
+                chunk.copy(received, bytesWritten);
+                bytesWritten += chunk.length;
             });
-            req.on("aborted", () => rejectOnce(new Error("Upload chunk was interrupted before completion.")));
-            req.on("error", (error) => rejectOnce(error));
-            output.on("error", (error) => rejectOnce(error));
-            output.on("finish", () => {
+            req.on("end", () => {
                 if (settled)
                     return;
                 settled = true;
                 resolve();
             });
-            req.pipe(output);
+            req.on("aborted", () => rejectOnce(new Error("Upload chunk was interrupted before completion.")));
+            req.on("error", (error) => rejectOnce(error));
         });
     }
     catch (error) {
@@ -1513,49 +1707,32 @@ app.post("/api/file-transfers/chunk", uploadLimiter, requireAuth, requireCsrf, a
         res.status(400).json({ error: message });
         return;
     }
-    if (bytesWritten !== expectedChunkSize) {
-        await rm(chunkPath, { force: true }).catch(() => undefined);
+    if (chunkTooLarge || bytesWritten !== expectedChunkSize) {
         res.status(400).json({ error: "Uploaded chunk size did not match the expected size." });
         return;
     }
     try {
-        const chunkBuffer = await readFile(chunkPath);
         const storageChunkPath = getChunkStoragePath(session.storagePath, chunkIndex);
         const { error: chunkUploadError } = await supabase.storage
             .from(FILE_BUCKET)
-            .upload(storageChunkPath, chunkBuffer, {
+            .upload(storageChunkPath, received, {
             contentType: "application/octet-stream",
-            upsert: false,
+            // Idempotent retries: re-sending an index overwrites identical bytes
+            // instead of failing, so resumed uploads never get stuck.
+            upsert: true,
         });
         if (chunkUploadError) {
             throw new Error(`Failed to store uploaded chunk: ${chunkUploadError.message}`);
         }
     }
     catch (error) {
-        await rm(chunkPath, { force: true }).catch(() => undefined);
         const message = error instanceof Error ? error.message : "Chunk upload failed";
         res.status(500).json({ error: message });
         return;
     }
-    await rm(chunkPath, { force: true }).catch(() => undefined);
     session.uploadedChunks.add(chunkIndex);
     session.updatedAt = nowIso();
-    {
-        const db = await loadDb();
-        const transfer = db.fileTransfers.find((entry) => entry.id === session.transferId && entry.userId === req.auth.userId);
-        if (transfer) {
-            transfer.uploadSessionId = session.id;
-            transfer.uploadTempDir = session.tempDir;
-            transfer.uploadChunkSize = session.chunkSize;
-            transfer.uploadTotalChunks = session.totalChunks;
-            transfer.uploadUploadedChunks = Array.from(session.uploadedChunks).sort((a, b) => a - b);
-            transfer.uploadUpdatedAt = session.updatedAt;
-            if (!transfer.storageMode) {
-                transfer.storageMode = "chunked";
-            }
-            await saveDb(db);
-        }
-    }
+    await persistChunkProgress(session, req.auth.userId);
     res.status(201).json({
         uploadId: session.id,
         chunkIndex,
@@ -1674,7 +1851,12 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
             if (failedTransfer && failedTransfer.transferStatus === "in_progress") {
                 failedTransfer.transferStatus = "failed";
                 failedTransfer.completedAt = nowIso();
+                failedTransfer.uploadUploadedChunks = [];
                 await saveDb(currentDb);
+            }
+            await cleanupUploadSession(session);
+            if (failedTransfer) {
+                await removeStoredTransferArtifacts(failedTransfer);
             }
             throw error;
         }
@@ -1902,13 +2084,20 @@ app.patch("/api/file-transfers/:id", syncLimiter, requireAuth, requireCsrf, asyn
     }
     if (typeof req.body.transfer_status === "string") {
         transfer.transferStatus = req.body.transfer_status;
-        if (req.body.transfer_status === "completed" || req.body.transfer_status === "cancelled") {
+        if (req.body.transfer_status === "completed" ||
+            req.body.transfer_status === "failed" ||
+            req.body.transfer_status === "cancelled") {
             transfer.completedAt = nowIso();
         }
-        if (req.body.transfer_status === "cancelled") {
+        // Terminal failure/cancel must also tear down the resumable session and
+        // its stored chunks. Otherwise the record can remain "in_progress" on the
+        // server after the browser reports a failed chunk, and orphaned objects
+        // keep consuming the user's storage quota.
+        if (req.body.transfer_status === "failed" || req.body.transfer_status === "cancelled") {
             const activeSession = await getActiveUploadSessionByTransferId(transfer.id, req.auth.userId);
             await cleanupUploadSession(activeSession);
             await removeStoredTransferArtifacts(transfer);
+            transfer.uploadUploadedChunks = [];
         }
     }
     await saveDb(db);
@@ -1919,27 +2108,95 @@ const writeResponseBuffer = async (res, buffer) => {
         return;
     }
     await new Promise((resolve) => {
-        res.once("drain", resolve);
+        const onDrain = () => {
+            res.off("close", onClose);
+            resolve();
+        };
+        const onClose = () => {
+            res.off("drain", onDrain);
+            resolve();
+        };
+        res.once("drain", onDrain);
+        res.once("close", onClose);
     });
 };
-const streamChunkedTransferDownload = async (res, transfer, action = "download") => {
+const streamChunkedTransferDownload = async (req, res, transfer, action = "download") => {
     if (!transfer.filePath || !transfer.uploadTotalChunks) {
         throw new Error("Chunked transfer metadata is incomplete.");
     }
-    res.status(200);
+    const chunkSize = transfer.uploadChunkSize || LARGE_UPLOAD_CHUNK_BYTES;
+    // Range support lets browsers start video/audio/image previews immediately
+    // and seek without downloading the whole file first.
+    const range = parseRangeHeader(req.headers.range, transfer.fileSize);
+    const start = range?.start ?? 0;
+    const end = range?.end ?? transfer.fileSize - 1;
+    const contentLength = end - start + 1;
+    res.status(range ? 206 : 200);
     res.setHeader("Content-Type", sanitizeMimeType(transfer.fileType));
     res.setHeader("Content-Disposition", `${action === "preview" ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(transfer.fileName)}`);
     res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Accept-Ranges", "bytes");
     res.setHeader("X-Transfer-Mode", "chunked");
-    res.setHeader("Content-Length", String(transfer.fileSize));
-    for (let chunkIndex = 0; chunkIndex < transfer.uploadTotalChunks; chunkIndex += 1) {
+    res.setHeader("Content-Length", String(contentLength));
+    if (range) {
+        res.setHeader("Content-Range", `bytes ${start}-${end}/${transfer.fileSize}`);
+    }
+    // Fetch only the chunks overlapped by the requested byte range, several at a
+    // time. Supabase downloads run concurrently while bytes are written to the
+    // client in order, so a large download is limited by bandwidth rather than by
+    // one-chunk-at-a-time round trips.
+    const plan = planChunkedByteRange(start, end, chunkSize);
+    if (plan.length === 0) {
+        res.end();
+        return;
+    }
+    const pending = new Map();
+    let nextIndex = 0;
+    let clientDisconnected = false;
+    req.once("aborted", () => {
+        clientDisconnected = true;
+    });
+    res.once("close", () => {
+        if (!res.writableEnded) {
+            clientDisconnected = true;
+        }
+    });
+    const downloadChunk = async (chunkIndex) => {
         const chunkPath = getChunkStoragePath(transfer.filePath, chunkIndex);
         const { data, error } = await supabase.storage.from(FILE_BUCKET).download(chunkPath);
         if (error || !data) {
             throw new Error(`Could not read stored chunk ${chunkIndex + 1}.`);
         }
-        const chunkBuffer = Buffer.from(await data.arrayBuffer());
-        await writeResponseBuffer(res, chunkBuffer);
+        return Buffer.from(await data.arrayBuffer());
+    };
+    const scheduleNextChunks = () => {
+        while (!clientDisconnected &&
+            pending.size < CHUNK_DOWNLOAD_CONCURRENCY &&
+            nextIndex < plan.length) {
+            const planIndex = nextIndex;
+            nextIndex += 1;
+            const promise = downloadChunk(plan[planIndex].chunkIndex);
+            // Attach a rejection handler immediately so a later chunk failing while
+            // an earlier one is still being written cannot become an unhandled
+            // rejection. Awaiting the original promise below still throws.
+            promise.catch(() => undefined);
+            pending.set(planIndex, promise);
+        }
+    };
+    scheduleNextChunks();
+    for (let planIndex = 0; planIndex < plan.length; planIndex += 1) {
+        if (clientDisconnected)
+            return;
+        const pendingChunk = pending.get(planIndex);
+        if (!pendingChunk)
+            return;
+        const chunkBuffer = await pendingChunk;
+        pending.delete(planIndex);
+        if (clientDisconnected)
+            return;
+        const { sliceStart, sliceEnd } = plan[planIndex];
+        await writeResponseBuffer(res, chunkBuffer.subarray(sliceStart, sliceEnd + 1));
+        scheduleNextChunks();
     }
     res.end();
 };
@@ -1950,10 +2207,17 @@ const getTransferDownloadLink = async (req, userId, transferId, action = "downlo
         return { error: "File not found" };
     }
     if (transfer.storageMode === "chunked") {
-        const previewQuery = action === "preview" ? "?action=preview" : "";
+        // The link points at this API (not the frontend origin) and carries a
+        // transfer-scoped token so it works from media elements and cross-site
+        // anchor navigations that cannot attach the localStorage Bearer token.
+        const params = new URLSearchParams();
+        if (action === "preview") {
+            params.set("action", "preview");
+        }
+        params.set("token", signScopedToken({ sub: userId, fileId: transfer.id }, "download", `${appConfig.downloadTokenTtlHours}h`).token);
         return {
             transfer,
-            signedUrl: `${getAppBaseUrl(req)}/api/file-transfers/${transfer.id}/download${previewQuery}`,
+            signedUrl: `${getApiBaseUrl(req)}/api/file-transfers/${transfer.id}/download?${params.toString()}`,
         };
     }
     const { data, error } = await supabase.storage
@@ -1981,7 +2245,7 @@ app.get("/api/file-transfers/:id/download-link", fileListLimiter, requireAuth, a
         fileName: result.transfer.fileName,
     });
 });
-app.get("/api/file-transfers/:id/download", fileListLimiter, requireAuth, async (req, res) => {
+app.get("/api/file-transfers/:id/download", fileListLimiter, requireDownloadAccess, async (req, res) => {
     const transferId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const action = req.query.action === "preview" ? "preview" : "download";
     const db = await loadDb();
@@ -1992,7 +2256,7 @@ app.get("/api/file-transfers/:id/download", fileListLimiter, requireAuth, async 
     }
     if (transfer.storageMode === "chunked") {
         try {
-            await streamChunkedTransferDownload(res, transfer, action);
+            await streamChunkedTransferDownload(req, res, transfer, action);
         }
         catch (error) {
             console.error("Chunked transfer download error:", error);
@@ -2361,6 +2625,11 @@ ensureDataDirs()
     server = app.listen(port, () => {
         logger.info({ port }, "UniLink API listening");
     });
+    // Boot-time persistence self-check: if the database cannot be read here,
+    // signups would silently become memory-only phantom accounts.
+    loadDb()
+        .then((db) => logger.info({ users: db.users.length, persistence: "remote" }, "Persistence check at startup"))
+        .catch((error) => logger.error({ error: error instanceof Error ? error.message : String(error) }, "Persistence check at startup FAILED — accounts may not survive restarts"));
     server.requestTimeout = UPLOAD_REQUEST_TIMEOUT_MS;
     server.headersTimeout = UPLOAD_REQUEST_TIMEOUT_MS + 60_000;
     server.keepAliveTimeout = 65_000;

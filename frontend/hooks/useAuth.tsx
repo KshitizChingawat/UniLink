@@ -25,6 +25,9 @@ interface AuthContextValue {
   signUp: (email: string, password: string, firstName: string, lastName: string, otp: string) => Promise<{ error: Error | null }>;
   requestRegistrationOtp: (email: string) => Promise<{ error: Error | null; developmentOtp?: string | null; deliveryMode?: "email" | "fallback" | null }>;
   verifyRegistrationOtp: (email: string, otp: string) => Promise<{ error: Error | null }>;
+  requestPasswordReset: (email: string) => Promise<{ error: Error | null; developmentOtp?: string | null; deliveryMode?: "email" | "fallback" | null }>;
+  resetPassword: (email: string, otp: string, newPassword: string, confirmPassword: string) => Promise<{ error: Error | null }>;
+  getEmailStatus: () => Promise<{ emailConfigured: boolean; otpFallbackEnabled: boolean; provider?: "mailtrap-api" | "smtp" | "none" } | null>;
   signInWithGoogle: (email: string, rememberMe?: boolean) => Promise<{ error: Error | null }>;
   signOut: () => Promise<{ success?: boolean; error?: Error }>;
   updateProfile: (profile: Partial<User>) => Promise<void>;
@@ -245,10 +248,12 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
 
     try {
+      // 45s: backend SMTP delivery can take up to ~20s before it falls back
+      // to an on-screen temporary OTP — do not abort before that arrives.
       const data = await fetchWithTimeout<{ message: string; developmentOtp?: string; deliveryMode?: "email" | "fallback" }>("/api/auth/request-registration-otp", {
         method: "POST",
         body: JSON.stringify({ email: normalizedEmail }),
-      });
+      }, 45000);
       toast.success(data.message);
       return {
         error: null,
@@ -286,6 +291,72 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       const error = err instanceof Error ? err : new Error("Failed to verify the code");
       toast.error(error.message || "Failed to verify the code");
       return { error };
+    }
+  };
+
+  const requestPasswordReset = async (email: string) => {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!isLikelyRealEmail(normalizedEmail)) {
+      const error = new Error("Enter a valid email address");
+      toast.error(error.message);
+      return { error };
+    }
+
+    try {
+      // 45s: backend SMTP delivery can take up to ~20s before it falls back
+      // to an on-screen temporary code — do not abort before that arrives.
+      const data = await fetchWithTimeout<{ message: string; developmentOtp?: string; deliveryMode?: "email" | "fallback" }>("/api/auth/forgot-password", {
+        method: "POST",
+        body: JSON.stringify({ email: normalizedEmail }),
+      }, 45000);
+      toast.success(data.message);
+      return {
+        error: null,
+        developmentOtp: data.developmentOtp || null,
+        deliveryMode: data.deliveryMode || "email",
+      };
+    } catch (err) {
+      const error =
+        err instanceof DOMException && err.name === "AbortError"
+          ? new Error("Sending the reset code took too long. Please try again.")
+          : err instanceof Error
+            ? err
+            : new Error("Failed to send reset code");
+      toast.error(error.message || "Failed to send reset code");
+      return { error, developmentOtp: null, deliveryMode: null };
+    }
+  };
+
+  const resetPassword = async (email: string, otp: string, newPassword: string, confirmPassword: string) => {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!isLikelyRealEmail(normalizedEmail)) {
+      const error = new Error("Enter a valid email address");
+      toast.error(error.message);
+      return { error };
+    }
+
+    try {
+      const data = await apiFetch<{ message: string }>("/api/auth/reset-password", {
+        method: "POST",
+        body: JSON.stringify({ email: normalizedEmail, otp, password: newPassword, confirmPassword }),
+      });
+      toast.success(data.message);
+      return { error: null };
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error("Failed to reset password");
+      toast.error(error.message || "Failed to reset password");
+      return { error };
+    }
+  };
+
+    // Best-effort server capability check (no toasts): tells the UI whether
+  // codes can arrive by email or only via on-screen fallback.
+  const getEmailStatus = async () => {
+    try {
+      const data = await apiFetch<{ emailConfigured: boolean; otpFallbackEnabled: boolean; provider?: "mailtrap-api" | "smtp" | "none" }>("/api/auth/email-status");
+      return data;
+    } catch {
+      return null;
     }
   };
 
@@ -362,6 +433,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       signUp,
       requestRegistrationOtp,
       verifyRegistrationOtp,
+      requestPasswordReset,
+      resetPassword,
+      getEmailStatus,
       signInWithGoogle,
       signOut,
       updateProfile,

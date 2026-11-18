@@ -7,12 +7,13 @@ import { rejectDisallowedOrigin } from "../http.js";
 import { httpLogger, logger } from "../logger.js";
 
 export const rateLimits = {
-  global: rateLimit({ windowMs: 15 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false, message: { error: "Too many requests. Please slow down and try again." } }),
+  global: rateLimit({ windowMs: 15 * 60 * 1000, max: 10_000, skip: req => req.path === "/api/health" || req.path.startsWith("/api/file-transfers"), standardHeaders: true, legacyHeaders: false, message: { error: "Too many requests. Please slow down and try again." } }),
   auth: rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false, message: { error: "Too many authentication attempts. Please try again later." } }),
   token: rateLimit({ windowMs: 60 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false, message: { error: "Too many token requests. Please try again later." } }),
-  fileList: rateLimit({ windowMs: 60 * 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false, message: { error: "Too many file listing requests. Please try again later." } }),
+  refresh: rateLimit({ windowMs: 60 * 60 * 1000, max: 240, standardHeaders: true, legacyHeaders: false }),
+  fileList: rateLimit({ windowMs: 60 * 60 * 1000, max: 20_000, standardHeaders: true, legacyHeaders: false, message: { error: "Too many file listing requests. Please try again later." } }),
   sync: rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false, message: { error: "Too many sync requests. Please try again later." } }),
-  upload: rateLimit({ windowMs: 15 * 60 * 1000, max: 1500, standardHeaders: true, legacyHeaders: false, message: { error: "Too many upload requests. Please wait before uploading again." } }),
+  upload: rateLimit({ windowMs: 15 * 60 * 1000, max: 5000, standardHeaders: true, legacyHeaders: false, message: { error: "Too many upload requests. Please wait before uploading again." } }),
 };
 
 const isTrustedProductionOrigin = (origin: string) => {

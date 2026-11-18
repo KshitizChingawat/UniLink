@@ -31,25 +31,187 @@ const transporter = canSendMail
 
 export const isEmailVerificationConfigured = () => Boolean(transporter);
 
-export const sendEmailOtp = async (email: string, otp: string, purpose: "register" | "reset") => {
-  if (!SMTP_FROM || !transporter) throw new Error("Email delivery is not configured.");
-  const action = purpose === "reset" ? "reset your password" : "verify your email";
-  const subject = purpose === "reset" ? "Reset your UniLink password" : "Verify your UniLink email";
-  const text = `Your code to ${action} is ${otp}. It expires in 10 minutes.`;
+// Which channel actually carries outbound mail. Exposed via /api/auth/email-status
+// (no secrets) so anyone can tell where a "sent" code really went: real SMTP
+// inboxes vs. a Mailtrap test inbox (sandbox mail NEVER reaches Gmail).
+export const getEmailProvider = (): "mailtrap-api" | "smtp" | "none" => {
+  if (!transporter) return "none";
+  return shouldUseMailtrapApi ? "mailtrap-api" : "smtp";
+};
+
+// Best-effort message id from a Mailtrap Send API response body.
+const extractMailtrapMessageId = (payloadText: string): string => {
+  try {
+    const payload = JSON.parse(payloadText) as { message_ids?: string[] };
+    const id = payload?.message_ids?.[0];
+    return typeof id === "string" && id ? id : "unknown";
+  } catch {
+    return "unknown";
+  }
+};
+
+export const sendRegistrationOtp = async (email: string, otp: string): Promise<string> => {
+  if (!SMTP_FROM) {
+    throw new Error("Email verification is not configured on the server.");
+  }
 
   if (shouldUseMailtrapApi) {
     const match = SMTP_FROM.match(/<([^>]+)>/);
-    const response = await fetch(MAILTRAP_SEND_API, {
-      method: "POST",
-      signal: AbortSignal.timeout(15000),
-      headers: { Authorization: `Bearer ${SMTP_PASS}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        from: { email: (match?.[1] || SMTP_FROM).trim(), name: "UniLink" },
-        to: [{ email }], subject, text,
+    const fromEmail = (match?.[1] || SMTP_FROM).trim();
+    const fromName = match ? SMTP_FROM.replace(match[0], "").trim() || "UniLink" : "UniLink";
+
+    const response = await Promise.race([
+      fetch(MAILTRAP_SEND_API, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${SMTP_PASS}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from: {
+            email: fromEmail,
+            name: fromName,
+          },
+          to: [{ email }],
+          subject: "Your UniLink verification code",
+          text: `Your UniLink verification code is ${otp}. It expires in 10 minutes.`,
+          html: `
+            <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #111827;">
+              <h2 style="margin-bottom: 8px;">Verify your UniLink email</h2>
+              <p>Use this one-time code to finish creating your account:</p>
+              <div style="display: inline-block; padding: 12px 18px; border-radius: 12px; background: #2563eb; color: white; font-size: 24px; font-weight: 700; letter-spacing: 6px;">
+                ${otp}
+              </div>
+              <p style="margin-top: 16px;">This code expires in 10 minutes.</p>
+            </div>
+          `,
+          category: "unilink_registration_otp",
+        }),
       }),
-    });
-    if (!response.ok) throw new Error(`Mail delivery failed (HTTP ${response.status})`);
-    return;
+      new Promise<Response>((_, reject) =>
+        setTimeout(() => reject(new Error("Mailtrap API timed out. Check your Mailtrap token and sending domain.")), 15000),
+      ),
+    ]);
+
+    if (!(response instanceof Response)) {
+      throw new Error("Mailtrap API request failed.");
+    }
+
+    if (!response.ok) {
+      const payload = await response.text();
+      throw new Error(`Mailtrap API rejected the OTP email: ${payload || response.statusText}`);
+    }
+    return extractMailtrapMessageId(await response.text());
   }
-  await transporter.sendMail({ from: SMTP_FROM, to: email, subject, text });
+
+  if (!transporter) {
+    throw new Error("Email verification is not configured on the server.");
+  }
+
+  const info = await Promise.race([
+    transporter.sendMail({
+      from: SMTP_FROM,
+      to: email,
+      subject: "Your UniLink verification code",
+      text: `Your UniLink verification code is ${otp}. It expires in 10 minutes.`,
+      html: `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #111827;">
+          <h2 style="margin-bottom: 8px;">Verify your UniLink email</h2>
+          <p>Use this one-time code to finish creating your account:</p>
+          <div style="display: inline-block; padding: 12px 18px; border-radius: 12px; background: #2563eb; color: white; font-size: 24px; font-weight: 700; letter-spacing: 6px;">
+            ${otp}
+          </div>
+          <p style="margin-top: 16px;">This code expires in 10 minutes.</p>
+        </div>
+      `,
+    }),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Email delivery timed out. Check SMTP settings and sender domain.")), 20000),
+    ),
+  ]) as { messageId?: string } | undefined;
+  return info?.messageId || "unknown";
 };
+
+export const sendPasswordResetOtp = async (email: string, otp: string): Promise<string> => {
+  if (!SMTP_FROM) {
+    throw new Error("Email verification is not configured on the server.");
+  }
+
+  // Spam-parity with the registration mail: identical subject shape and code
+  // line so filters treat both flows the same; the reset context is kept in
+  // the trailing sentence, never in the subject.
+  const subject = "Your UniLink verification code";
+  const text = `Your UniLink verification code is ${otp}. It expires in 10 minutes. If you did not request a password reset, ignore this email.`;
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #111827;">
+      <h2 style="margin-bottom: 8px;">Verify it's you</h2>
+      <p>Use this one-time code to finish resetting your password:</p>
+      <div style="display: inline-block; padding: 12px 18px; border-radius: 12px; background: #2563eb; color: white; font-size: 24px; font-weight: 700; letter-spacing: 6px;">
+        ${otp}
+      </div>
+      <p style="margin-top: 16px;">This code expires in 10 minutes. If you did not request a password reset, ignore this email.</p>
+    </div>
+  `;
+
+  if (shouldUseMailtrapApi) {
+    const match = SMTP_FROM.match(/<([^>]+)>/);
+    const fromEmail = (match?.[1] || SMTP_FROM).trim();
+    const fromName = match ? SMTP_FROM.replace(match[0], "").trim() || "UniLink" : "UniLink";
+
+    const response = await Promise.race([
+      fetch(MAILTRAP_SEND_API, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${SMTP_PASS}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from: { email: fromEmail, name: fromName },
+          to: [{ email }],
+          subject,
+          text,
+          html,
+          category: "unilink_password_reset_otp",
+        }),
+      }),
+      new Promise<Response>((_, reject) =>
+        setTimeout(() => reject(new Error("Mailtrap API timed out. Check your Mailtrap token and sending domain.")), 15000),
+      ),
+    ]);
+
+    if (!(response instanceof Response)) {
+      throw new Error("Mailtrap API request failed.");
+    }
+
+    if (!response.ok) {
+      const payload = await response.text();
+      throw new Error(`Mailtrap API rejected the password reset email: ${payload || response.statusText}`);
+    }
+    return extractMailtrapMessageId(await response.text());
+  }
+
+  if (!transporter) {
+    throw new Error("Email verification is not configured on the server.");
+  }
+
+  const info = await Promise.race([
+    transporter.sendMail({ from: SMTP_FROM, to: email, subject, text, html }),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Email delivery timed out. Check SMTP settings and sender domain.")), 20000),
+    ),
+  ]) as { messageId?: string } | undefined;
+  return info?.messageId || "unknown";
+};
+
+export const isMailtrapDemoRestrictionError = (error: unknown) => {
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+
+  return (
+    message.includes("Demo domains can only be used to send emails to account owners") ||
+    message.includes("You can only send testing emails to your own email address")
+  );
+};
+
+export const sendEmailOtp = (email: string, otp: string, purpose: "register" | "reset") =>
+  purpose === "register" ? sendRegistrationOtp(email, otp) : sendPasswordResetOtp(email, otp);
