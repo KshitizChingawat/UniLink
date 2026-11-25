@@ -20,6 +20,18 @@ export const verifyProductionStorage = async () => {
       throw new Error(`Production requires a private ${name} bucket`);
     }
   }
-  const { error } = await supabase.from("revoked_tokens").select("jti").limit(1);
-  if (error) throw new Error("Apply backend/revoked_tokens.sql before starting the server");
+  const { error, status } = await supabase.from("revoked_tokens").select("jti,reason").limit(0);
+  if (!error) return;
+
+  const failure = `Revocation table check failed (HTTP ${status}, ${error.code || "no database error code"})`;
+  if (error.code === "PGRST205" || error.code === "42P01") {
+    throw new Error(`${failure}. Run backend/revoked_tokens.sql in the Supabase project configured on Render to create the table and refresh the API schema.`);
+  }
+  if (error.code === "42501") {
+    throw new Error(`${failure}. Verify the backend uses the service_role key and apply the grants in backend/revoked_tokens.sql.`);
+  }
+  if (status === 401 || status === 403) {
+    throw new Error(`${failure}. Check the Supabase URL and service-role credential configured on the backend.`);
+  }
+  throw new Error(`${failure}. Check Supabase Data API availability and the public.revoked_tokens schema.`);
 };

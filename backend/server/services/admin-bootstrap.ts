@@ -13,7 +13,7 @@ import type { UserRecord } from "../types.js";
 export const ensureConfiguredAdmin = async () => {
   if (!appConfig.adminEmail || !appConfig.adminPassword) return;
 
-  const db = await loadDb();
+  const db = await loadDb({ allowCreate: true });
   const email = appConfig.adminEmail.trim().toLowerCase();
   const timestamp = nowIso();
   let user = db.users.find((entry) => entry.email.toLowerCase() === email);

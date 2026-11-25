@@ -2,6 +2,7 @@ import bcrypt from "bcryptjs";
 import { randomBytes, randomUUID } from "node:crypto";
 import jwt from "jsonwebtoken";
 import { appConfig } from "./config.js";
+import { HttpError } from "./http.js";
 import { loadDb } from "./storage.js";
 import { supabase } from "./supabase.js";
 const ACCESS_TOKEN_EXPIRES_IN = appConfig.jwtExpiresIn;
@@ -35,7 +36,7 @@ export const isTokenRevoked = async (jti) => {
     const { data, error } = await supabase.from(revokedTokenTable)
         .select("jti").eq("jti", jti).maybeSingle();
     if (error)
-        throw new Error("Session verification unavailable");
+        throw new HttpError(503, "Session verification is temporarily unavailable. Please retry.");
     return Boolean(data);
 };
 export const verifyScopedToken = async (token, tokenKind) => {
@@ -46,7 +47,9 @@ export const verifyScopedToken = async (token, tokenKind) => {
     if (await isTokenRevoked(payload.jti)) {
         throw new Error("Token revoked");
     }
-    const db = await loadDb();
+    const db = await loadDb().catch(() => {
+        throw new HttpError(503, "Account storage is temporarily unavailable. Please retry.");
+    });
     const owner = db.users.find(user => user.id === payload.sub);
     if (!owner || (payload.version ?? 0) !== (owner.sessionVersion ?? 0) ||
         (appConfig.isProduction && owner.preferences.twoFactorEnabled)) {
@@ -153,7 +156,9 @@ export const requireAuth = async (req, res, next) => {
         };
         next();
     }
-    catch {
+    catch (error) {
+        if (error instanceof HttpError)
+            return next(error);
         res.status(401).json({ error: "Unauthorized" });
     }
 };

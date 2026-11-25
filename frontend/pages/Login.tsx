@@ -1,5 +1,5 @@
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link } from 'wouter';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -13,25 +13,12 @@ import GenerativeArtSceneV3 from '@/components/ui/quantum-nebula';
 import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 
-const blockedEmailDomains = new Set([
-  'example.com',
-  'example.org',
-  'example.net',
-  'test.com',
-  'invalid.com',
-  'fake.com',
-  'mailinator.com',
-  'tempmail.com',
-  '10minutemail.com',
-  'yopmail.com',
-  'guerrillamail.com',
-  'sharklasers.com',
-]);
-
 const Login = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState(() => localStorage.getItem('remembered_email') || '');
-  const [password, setPassword] = useState('');
+  const formRef = useRef<HTMLFormElement>(null);
+  const [hasPassword, setHasPassword] = useState(false);
+  const [connected, setConnected] = useState(false);
   const [rememberMe, setRememberMe] = useState(() => localStorage.getItem('remember-me') === 'true');
   const [loading, setLoading] = useState(false);
   const [forgotOpen, setForgotOpen] = useState(false);
@@ -46,44 +33,26 @@ const Login = () => {
   const [showConfirmNewPassword, setShowConfirmNewPassword] = useState(false);
   const { signIn, requestPasswordReset, resetPassword } = useAuth();
   const normalizedEmail = email.trim().toLowerCase();
-  const emailLooksValid =
-    !email || (
-      /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) &&
-      !blockedEmailDomains.has(normalizedEmail.split('@')[1] || '')
-    );
+  const emailLooksValid = !email || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail);
 
-  const performLogin = async () => {
-    if (!email.trim() || !password.trim()) {
-      toast.error('Enter your email and password to continue.');
-      return false;
-    }
-
-    if (!emailLooksValid) {
-      toast.error('Enter a valid email address');
-      return false;
-    }
-
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (loading || connected) return;
+    // Mobile password managers can fill the inputs without sending a React change event.
+    const fields = new FormData(event.currentTarget);
+    const submittedEmail = String(fields.get('email') ?? '');
+    const submittedPassword = String(fields.get('password') ?? '');
     setLoading(true);
-    const result = await signIn(email, password, rememberMe);
-    setLoading(false);
-
-    if (!result.error) {
-      setEmail('');
-      setPassword('');
-      setRememberMe(false);
-      return true;
+    try {
+      const result = await signIn(submittedEmail, submittedPassword, rememberMe);
+      if (!result.error) setConnected(true);
+    } finally {
+      setLoading(false);
     }
-
-    return false;
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await performLogin();
   };
 
   const openForgotDialog = () => {
-    setForgotEmail(email);
+    setForgotEmail(formRef.current ? String(new FormData(formRef.current).get('email') ?? '') : email);
     setForgotStep('email');
     setResetOtp('');
     setNewPassword('');
@@ -129,7 +98,10 @@ const Login = () => {
     setResettingPassword(false);
     if (!result.error) {
       setEmail(forgotEmail.trim());
-      setPassword('');
+      formRef.current?.reset();
+      const emailInput = formRef.current?.elements.namedItem('email');
+      if (emailInput instanceof HTMLInputElement) emailInput.value = forgotEmail.trim();
+      setHasPassword(false);
       setForgotOpen(false);
       setForgotStep('email');
       setResetOtp('');
@@ -175,18 +147,21 @@ const Login = () => {
             <p className="mt-1 text-sm font-medium text-slate-300 sm:mt-1.5 sm:text-[15px]">Sign in to your UniLink account</p>
           </div>
 
-          <form onSubmit={handleSubmit} className="space-y-3 sm:space-y-4">
+          <form ref={formRef} onSubmit={handleSubmit} className="space-y-3 sm:space-y-4">
             <div>
               <Label htmlFor="email" className="text-slate-300">Email address</Label>
               <Input
                 id="email"
                 type="email"
-                value={email}
+                name="email"
+                autoCapitalize="none"
+                spellCheck={false}
+                defaultValue={localStorage.getItem('remembered_email') || ''}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="Enter your email"
                 className="mt-1 bg-white/5 border border-white/20 placeholder:text-slate-500/50 focus:border-sky-400/50 text-white disabled:cursor-not-allowed md:text-sm"
                 style={{ backgroundColor: 'rgba(255,255,255,0.05)', color: 'white', borderColor: 'rgba(255,255,255,0.2)' }}
-                autoComplete="email"
+                autoComplete="username"
                 required
               />
               {!emailLooksValid && (
@@ -201,8 +176,8 @@ const Login = () => {
                   id="password"
                   autoComplete="current-password"
                   type={showPassword ? 'text' : 'password'}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  name="password"
+                  onChange={(e) => setHasPassword(Boolean(e.target.value))}
                   placeholder="Enter your password"
                   className="bg-white/5 border border-white/20 placeholder:text-slate-500/50 focus:border-sky-400/50 text-white disabled:cursor-not-allowed md:text-sm pr-10"
                   style={{ backgroundColor: 'rgba(255,255,255,0.05)', color: 'white', borderColor: 'rgba(255,255,255,0.2)' }}
@@ -241,16 +216,15 @@ const Login = () => {
 
             <div className="rounded-[1.15rem] border border-white/10 bg-[linear-gradient(145deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03))] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_18px_45px_rgba(6,172,241,0.12)] sm:px-4 sm:py-3.5">
               <AnimatedToggle
-                canActivate={Boolean(email.trim() && password.trim())}
+                canActivate={Boolean(email.trim() && hasPassword)}
+                isConnected={connected}
                 isSubmitting={loading}
-                idleLabel="Enter your credentials to power the link"
+                idleLabel="Tap the left module to sign in"
                 readyLabel="Tap the left module to sign in"
                 successLabel="UniLink connected. Logging you in..."
-                onActivate={performLogin}
                 className="mx-auto w-full gap-2 sm:gap-2.5"
               />
             </div>
-            <button type="submit" className="sr-only focus:not-sr-only focus:text-white" disabled={loading}>Sign in</button>
           </form>
 
           <div className="mt-3.5 text-center sm:mt-4">

@@ -21,6 +21,8 @@ interface User {
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
+  sessionUnavailable: boolean;
+  retrySession: () => void;
   signIn: (email: string, password: string, rememberMe?: boolean) => Promise<{ error: Error | null; shouldRedirect?: boolean }>;
   signUp: (email: string, password: string, firstName: string, lastName: string, otp: string) => Promise<{ error: Error | null }>;
   requestRegistrationOtp: (email: string) => Promise<{ error: Error | null; developmentOtp?: string | null; deliveryMode?: "email" | "fallback" | null }>;
@@ -91,43 +93,47 @@ const fetchWithTimeout = async <T,>(input: string, init: RequestInit, timeoutMs 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [sessionUnavailable, setSessionUnavailable] = useState(false);
+  const [sessionAttempt, setSessionAttempt] = useState(0);
   const [, navigate] = useLocation();
 
   useEffect(() => {
+    let active = true;
     const bootstrap = async () => {
       localStorage.removeItem(rememberedAccountsKey);
       applyStoredTheme();
       const token = localStorage.getItem("auth_token");
-      const userData = localStorage.getItem("user_data");
-
+      const isCurrent = () => active && localStorage.getItem("auth_token") === token;
+      setSessionUnavailable(false);
       if (!token) {
         setLoading(false);
         return;
       }
 
-      if (userData) {
-        try {
-          setUser(JSON.parse(userData));
-        } catch {
-          localStorage.removeItem("user_data");
-        }
-      }
-
+      setLoading(true);
       try {
-        const data = await apiFetch<{ user: User }>("/api/auth/me");
+        const data = await fetchWithTimeout<{ user: User }>("/api/auth/me", {});
+        if (!isCurrent()) return;
+        if (!data?.user?.id) throw new Error("Invalid session response");
         setUser(data.user);
         localStorage.setItem("user_data", JSON.stringify(data.user));
-      } catch {
-        localStorage.removeItem("auth_token");
-        localStorage.removeItem("user_data");
-        setUser(null);
+      } catch (error) {
+        if (!isCurrent()) return;
+        if (error instanceof ApiError && error.status === 401) {
+          localStorage.removeItem("auth_token");
+          localStorage.removeItem("user_data");
+          setUser(null);
+        } else {
+          setSessionUnavailable(true);
+        }
       } finally {
-        setLoading(false);
+        if (active) setLoading(false);
       }
     };
 
-    bootstrap();
-  }, []);
+    void bootstrap();
+    return () => { active = false; };
+  }, [sessionAttempt]);
 
   const persistRememberedEmail = (email: string, rememberMe: boolean) => {
     if (rememberMe) {
@@ -142,17 +148,13 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   const signIn = async (email: string, password: string, rememberMe: boolean = false) => {
     const normalizedEmail = email.trim().toLowerCase();
-    if (!isLikelyRealEmail(normalizedEmail)) {
-      const error = new Error("Enter a valid email address");
-      toast.error(error.message);
-      return { error, shouldRedirect: false };
-    }
     try {
       const data = await apiFetch<{ token: string; user: User }>("/api/auth/login", {
         method: "POST",
         body: JSON.stringify({ email: normalizedEmail, password, rememberMe }),
       });
 
+      setSessionUnavailable(false);
       localStorage.setItem("auth_token", data.token);
       localStorage.setItem("user_data", JSON.stringify(data.user));
       persistRememberedEmail(normalizedEmail, rememberMe);
@@ -162,7 +164,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     } catch (err) {
       const error = err instanceof Error ? err : new Error("Sign in failed");
       if (err instanceof ApiError && err.message === "Invalid credentials") {
-        toast.error("Invalid email or password. Please try again or sign up.");
+        toast.error("The email or password didn’t match. Try again or use Forgot password.");
         return { error, shouldRedirect: false };
       }
       toast.error(error.message || "Sign in failed");
@@ -183,6 +185,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         body: JSON.stringify({ email: normalizedEmail, rememberMe }),
       });
 
+      setSessionUnavailable(false);
       localStorage.setItem("auth_token", data.token);
       localStorage.setItem("user_data", JSON.stringify(data.user));
       persistRememberedEmail(normalizedEmail, rememberMe);
@@ -226,6 +229,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         return { error };
       }
 
+      setSessionUnavailable(false);
       localStorage.setItem("auth_token", data.token);
       localStorage.setItem("user_data", JSON.stringify(data.user));
       setUser(data.user);
@@ -429,6 +433,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     () => ({
       user,
       loading,
+      sessionUnavailable,
+      retrySession: () => setSessionAttempt(attempt => attempt + 1),
       signIn,
       signUp,
       requestRegistrationOtp,
@@ -441,7 +447,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       updateProfile,
       subscribeToPro,
     }),
-    [user, loading],
+    [user, loading, sessionUnavailable],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

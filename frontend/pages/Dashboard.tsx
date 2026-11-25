@@ -1,5 +1,6 @@
 import { useLocation, Route, Switch } from 'wouter';
 import { useAuth } from '@/hooks/useAuth';
+import { Button } from "@/components/ui/button";
 import { Loader2 } from 'lucide-react';
 import { useEffect } from 'react';
 import DashboardLayout from '@/components/dashboard/DashboardLayout';
@@ -13,20 +14,30 @@ import SettingsPage from '@/components/dashboard/SettingsPage';
 import SmartSyncDashboard from '@/components/dashboard/SmartSyncDashboard';
 
 const Dashboard = () => {
-  const { user, loading } = useAuth();
+  const { user, loading, sessionUnavailable, retrySession } = useAuth();
   const [location, navigate] = useLocation();
 
   useEffect(() => {
-    if (!loading && !user) {
+    if (!loading && !user && !sessionUnavailable) {
       navigate('/login');
     }
-  }, [user, loading, navigate]);
+  }, [user, loading, sessionUnavailable, navigate]);
 
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <Loader2 className="w-8 h-8 animate-spin text-unilink-600" />
       </div>
+    );
+  }
+
+  if (sessionUnavailable) {
+    return (
+      <main className="min-h-screen grid place-content-center gap-4 px-6 text-center">
+        <h1 className="text-xl font-semibold">We couldn’t check your session</h1>
+        <p>Your sign-in is saved. Check your connection and try again.</p>
+        <Button className="justify-self-center" onClick={retrySession}>Try again</Button>
+      </main>
     );
   }
 

@@ -14,7 +14,7 @@ import { getEmailProvider, isEmailVerificationConfigured, sendEmailOtp } from ".
 import { clearAuthCookies, comparePassword, createCsrfToken, hashPassword, requireAuth, requireCsrf, revokeToken, sanitizeUser, setAuthCookies, signAuthToken, signScopedToken, verifyScopedToken, type AuthenticatedRequest } from "./auth.js";
 import { decryptVaultContent, encryptVaultContent } from "./crypto.js";
 import { containsNullBytes, ensureRelativeStoragePath, escapeHtml, isZipBombCandidate, nowIso, parseRangeHeader, planChunkedByteRange, sanitizeFilename, sanitizeMimeType, sanitizeTextInput } from "./helpers.js";
-import { createId, ensureDataDirs, loadDb, saveDb } from "./storage.js";
+import { createId, ensureDataDirs, getAccountStorageStatus, loadDb, saveDb } from "./storage.js";
 import type { AiSuggestionRecord, BluetoothDeviceRecord, ClipboardRecord, DeviceRecord, EmailVerificationRecord, FileTransferRecord, PairSessionRecord, UserRecord, VaultRecord } from "./types.js";
 import { appConfig } from "./config.js";
 import { createErrorHandler, HttpError } from "./http.js";
@@ -531,7 +531,8 @@ const requireDownloadAccess = async (
       jti: String(payload.jti),
     };
     next();
-  } catch {
+  } catch (error) {
+    if (error instanceof HttpError) return next(error);
     res.status(401).json({ error: "Unauthorized" });
   }
 };
@@ -959,8 +960,8 @@ const isPairSessionExpired = (session: PairSessionRecord) =>
 
 app.get("/api/health", async (_req, res) => {
   try {
-    await loadDb();
-    res.json({ status: "ok", uptime: process.uptime(), db: "connected" });
+    const db = await getAccountStorageStatus();
+    res.json({ status: "ok", uptime: process.uptime(), db });
   } catch {
     res.status(503).json({ status: "error", uptime: process.uptime(), db: "error" });
   }
@@ -1003,7 +1004,7 @@ app.post("/api/auth/request-registration-otp", tokenLimiter, async (req, res) =>
   }
 
   try {
-    const db = await loadDb();
+    const db = await loadDb({ allowCreate: true });
     consumeExpiredEmailVerifications(db);
 
     if (db.users.some((user) => normalizeEmail(user.email) === email)) {
@@ -1133,12 +1134,6 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
   }
 
   const email = normalizeEmail(parsed.data.email);
-  const emailError = assertValidEmailAddress(email);
-  if (emailError) {
-    res.status(400).json({ error: emailError });
-    return;
-  }
-
   try {
     const db = await loadDb();
     const user = db.users.find((entry) => normalizeEmail(entry.email) === email);
@@ -1167,7 +1162,7 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
     });
   } catch (error) {
     console.error("Login lookup error:", error);
-    res.status(500).json({ error: "Unable to sign in right now. Please try again." });
+    res.status(503).json({ error: "Account storage is temporarily unavailable. Please try signing in again." });
   }
 });
 
@@ -1190,7 +1185,7 @@ app.post("/api/auth/google", tokenLimiter, async (req, res) => {
   }
 
   try {
-    const db = await loadDb();
+    const db = await loadDb({ allowCreate: true });
     let user = db.users.find((entry) => normalizeEmail(entry.email) === email);
 
     if (!user) {
@@ -3251,15 +3246,8 @@ verifyProductionStorage()
     server = app.listen(port, () => {
       logger.info({ port }, "UniLink API listening");
     });
-    // Boot-time persistence self-check: if the database cannot be read here,
-    // signups would silently become memory-only phantom accounts.
-    loadDb()
-      .then((db) =>
-        logger.info(
-          { users: db.users.length, persistence: "remote" },
-          "Persistence check at startup",
-        ),
-      )
+    getAccountStorageStatus()
+      .then(db => logger.info({ db }, "Account storage check at startup"))
       .catch((error) =>
         logger.error(
           { error: error instanceof Error ? error.message : String(error) },

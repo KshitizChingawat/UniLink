@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import type { Request, Response, NextFunction } from "express";
 import type { UserRecord } from "./types.js";
 import { appConfig } from "./config.js";
+import { HttpError } from "./http.js";
 import { loadDb } from "./storage.js";
 import { supabase } from "./supabase.js";
 
@@ -70,7 +71,7 @@ export const revokeToken = async (jti: string, reason = "manual") => {
 export const isTokenRevoked = async (jti: string) => {
   const { data, error } = await supabase.from(revokedTokenTable)
     .select("jti").eq("jti", jti).maybeSingle();
-  if (error) throw new Error("Session verification unavailable");
+  if (error) throw new HttpError(503, "Session verification is temporarily unavailable. Please retry.");
   return Boolean(data);
 };
 
@@ -82,7 +83,9 @@ export const verifyScopedToken = async (token: string, tokenKind: TokenKind) => 
   if (await isTokenRevoked(payload.jti)) {
     throw new Error("Token revoked");
   }
-  const db = await loadDb();
+  const db = await loadDb().catch(() => {
+    throw new HttpError(503, "Account storage is temporarily unavailable. Please retry.");
+  });
   const owner = db.users.find(user => user.id === payload.sub);
   if (!owner || (payload.version ?? 0) !== (owner.sessionVersion ?? 0) ||
       (appConfig.isProduction && owner.preferences.twoFactorEnabled)) {
@@ -209,7 +212,8 @@ export const requireAuth = async (
       jti: String(payload.jti),
     };
     next();
-  } catch {
+  } catch (error) {
+    if (error instanceof HttpError) return next(error);
     res.status(401).json({ error: "Unauthorized" });
   }
 };

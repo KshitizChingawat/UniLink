@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import {
   ArrowRight,
   CheckCircle2,
@@ -18,10 +18,8 @@ interface AnimatedToggleProps {
   idleLabel?: string;
   readyLabel?: string;
   successLabel?: string;
-  onActivate?: () => Promise<boolean> | boolean;
+  isConnected?: boolean;
 }
-
-const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
 const AnimatedToggle = ({
   canActivate = false,
@@ -30,12 +28,9 @@ const AnimatedToggle = ({
   idleLabel = 'Fill credentials to connect',
   readyLabel = 'Tap left module to sign in',
   successLabel = 'Connection established',
-  onActivate,
+  isConnected = false,
 }: AnimatedToggleProps) => {
-  const [phase, setPhase] = useState<'idle' | 'animating' | 'connected'>('idle');
-
-  const isAnimating = phase === 'animating' || isSubmitting;
-  const isConnected = phase === 'connected';
+  const isAnimating = isSubmitting;
   const isReady = canActivate && !isAnimating && !isConnected;
 
   const statusText = useMemo(() => {
@@ -44,26 +39,6 @@ const AnimatedToggle = ({
     if (isReady) return readyLabel;
     return idleLabel;
   }, [idleLabel, isAnimating, isConnected, isReady, readyLabel, successLabel]);
-
-  const handleActivate = async () => {
-    if (!canActivate || isAnimating || isConnected) return;
-
-    setPhase('animating');
-    await wait(650);
-
-    try {
-      const result = await onActivate?.();
-      if (result === false) {
-        setPhase('idle');
-        return;
-      }
-
-      setPhase('connected');
-    } catch {
-      // Let the caller present the error, but always make the control usable again.
-      setPhase('idle');
-    }
-  };
 
   return (
     <div className={cn('flex flex-col items-center justify-center gap-4', className)}>
@@ -87,10 +62,9 @@ const AnimatedToggle = ({
           )}
         />
         <button
-          type="button"
+          type="submit"
           aria-label="Start login connection"
-          onClick={handleActivate}
-          disabled={!canActivate || isAnimating || isConnected}
+          disabled={isAnimating || isConnected}
           className={cn(
             'group relative z-10 flex h-[4.35rem] w-[4.35rem] items-center justify-center overflow-hidden rounded-[1.35rem] border transition-all duration-500',
             isConnected

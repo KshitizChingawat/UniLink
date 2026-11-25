@@ -164,6 +164,9 @@ export const apiFetch = async <T>(input: string, init: RequestInit = {}): Promis
   }
 
   const isJson = response.headers.get("content-type")?.includes("application/json");
+  if (response.ok && input.startsWith("/api/auth/") && !isJson && response.status !== 204) {
+    throw new ApiError("The UniLink authentication service is unavailable. Please try again.", 503);
+  }
   const payload = isJson ? await response.json() : await response.text();
 
   if (!response.ok) {
