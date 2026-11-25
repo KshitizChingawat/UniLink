@@ -17,6 +17,7 @@ import {
   BarChart3
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import DownloadButton from '@/components/DownloadButton';
 import Logo from '@/components/Logo';
 
 interface DashboardLayoutProps {
@@ -75,7 +76,7 @@ const DashboardLayout = ({ children }: DashboardLayoutProps) => {
               variant="ghost"
               size="sm"
               onClick={() => setSidebarOpen(false)}
-              className="lg:hidden"
+              className="lg:hidden" aria-label="Close navigation"
             >
               <X className="w-5 h-5" />
             </Button>
@@ -137,6 +138,7 @@ const DashboardLayout = ({ children }: DashboardLayoutProps) => {
           {/* Footer */}
           <div className="dashboard-border shrink-0 border-t bg-white/95 p-4 backdrop-blur dark:bg-slate-950/95">
             <div className="space-y-2">
+              <DownloadButton variant="ghost" className="w-full justify-start" />
               <Link
                 to="/dashboard/settings"
                 className="flex items-center space-x-3 px-3 py-2 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-100 transition-colors"
@@ -161,16 +163,17 @@ const DashboardLayout = ({ children }: DashboardLayoutProps) => {
       {/* Main content */}
       <div className="dashboard-main min-w-0 flex-1 lg:ml-0">
         {/* Mobile header */}
-        <div className="dashboard-mobile-header lg:hidden bg-white dark:bg-slate-950 border-b px-4 py-3 flex items-center justify-between">
+        <div className="dashboard-mobile-header lg:hidden bg-white dark:bg-slate-950 border-b px-4 py-3 grid grid-cols-[1fr_auto_1fr] items-center">
           <Button
             variant="ghost"
             size="sm"
+            className="size-11 justify-self-start" aria-label="Open navigation" aria-expanded={sidebarOpen}
             onClick={() => setSidebarOpen(true)}
           >
             <Menu className="w-5 h-5" />
           </Button>
           <Logo size="sm" />
-          <div></div> {/* Spacer for center alignment */}
+          <span aria-hidden="true" />
         </div>
 
         {/* Page content */}

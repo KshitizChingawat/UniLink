@@ -1,3 +1,4 @@
+import { QRCodeSVG } from "qrcode.react";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -103,11 +104,7 @@ const DevicesPage = () => {
               {pairSession ? (
                 <div className="space-y-4">
                   <div className="mx-auto w-fit rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-                    <img
-                      src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(connectLink)}`}
-                      alt="UniLink device pairing QR code"
-                      className="h-56 w-56 rounded-2xl"
-                    />
+                    <QRCodeSVG value={connectLink} size={224} title="UniLink device pairing QR code" />
                   </div>
                   <p className="text-center text-sm text-gray-500">
                     Expires at {new Date(pairSession.expiresAt).toLocaleTimeString()}

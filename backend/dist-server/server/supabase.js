@@ -9,3 +9,16 @@ export const FILE_BUCKET = "unilink-files"; // cloud file transfers
 export const SESSION_BUCKET = "unilink-sessions"; // real-time session transfers
 export const DB_BUCKET = "unilink-db"; // persistent JSON database
 export const SECURITY_BUCKET = "unilink-security";
+export const verifyProductionStorage = async () => {
+    if (!appConfig.isProduction)
+        return;
+    for (const name of [DB_BUCKET, FILE_BUCKET, SESSION_BUCKET]) {
+        const { data, error } = await supabase.storage.getBucket(name);
+        if (error || !data || data.public !== false) {
+            throw new Error(`Production requires a private ${name} bucket`);
+        }
+    }
+    const { error } = await supabase.from("revoked_tokens").select("jti").limit(1);
+    if (error)
+        throw new Error("Apply backend/revoked_tokens.sql before starting the server");
+};

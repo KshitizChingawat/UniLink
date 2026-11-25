@@ -30,7 +30,7 @@ export const httpLogger = pinoHttp({
         req(req) {
             return {
                 method: req.method,
-                url: req.url,
+                url: req.url.split("?")[0].replace(/(\/(?:pair-sessions|connect|receive)\/)[^/]+/, "$1[redacted]"),
                 remoteAddress: req.remoteAddress,
                 userAgent: req.headers["user-agent"],
             };

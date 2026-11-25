@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response, RequestHandler } from "express";
-import { ZodTypeAny, z } from "zod";
+import { z } from "zod";
 import { logger } from "./logger.js";
 import { sanitizeObjectStrings } from "./helpers.js";
 
@@ -20,7 +20,7 @@ export const asyncHandler =
     Promise.resolve(handler(req, res, next)).catch(next);
 
 export const validate =
-  <T extends ZodTypeAny>(schema: T, target: "body" | "query" | "params"): RequestHandler =>
+  <T extends z.ZodType>(schema: T, target: "body" | "query" | "params"): RequestHandler =>
   (req, _res, next) => {
     const parsed = schema.safeParse(req[target]);
     if (!parsed.success) {

@@ -4,7 +4,7 @@ import {
   Laptop, 
   Smartphone, 
   Tablet, 
-  Watch,
+  MonitorSmartphone,
   CheckCircle
 } from 'lucide-react';
 
@@ -13,41 +13,39 @@ const CompatibilitySection = () => {
     {
       Icon: Monitor,
       name: 'Windows',
-      versions: ['Windows 10', 'Windows 11'],
+      versions: ['Chrome or Edge'],
       color: 'bg-blue-500'
     },
     {
       Icon: Laptop,
       name: 'macOS',
-      versions: ['macOS 11+', 'Intel & Apple Silicon'],
+      versions: ['Chrome', 'Safari on Sonoma or later'],
       color: 'bg-gray-700'
     },
     {
       Icon: Smartphone,
       name: 'Android',
-      versions: ['Android 8.0+', 'All manufacturers'],
+      versions: ['Chrome on phones and tablets'],
       color: 'bg-green-500'
     },
     {
       Icon: Tablet,
       name: 'iOS/iPadOS',
-      versions: ['iOS 14+', 'iPadOS 14+'],
+      versions: ['Safari on iPhone and iPad'],
       color: 'bg-blue-600'
     },
     {
-      Icon: Watch,
+      Icon: MonitorSmartphone,
       name: 'Linux',
-      versions: ['Ubuntu', 'Debian', 'Fedora', 'Arch'],
+      versions: ['Desktop Chrome'],
       color: 'bg-orange-500'
     }
   ];
 
   const benefits = [
-    'Works across all your devices instantly',
-    'No platform restrictions or limitations',
-    'Same features on every operating system',
-    'Regular updates for all platforms',
-    'One account, unlimited devices'
+    'Use one account across your devices',
+    'Launch UniLink from your home screen or desktop',
+    'Keep using the web version in your browser'
   ];
 
   return (
@@ -58,7 +56,7 @@ const CompatibilitySection = () => {
             True <span className="bg-gradient-to-r from-unilink-600 to-purple-600 bg-clip-text text-transparent">Universal</span> Compatibility
           </h2>
           <p className="text-xl text-gray-600 dark:text-slate-300 max-w-3xl mx-auto">
-            The only cross-platform solution that works seamlessly across every major operating system and device type.
+            Install UniLink from a supported browser on your phone, tablet, or computer.
           </p>
         </div>
 
@@ -82,7 +80,7 @@ const CompatibilitySection = () => {
         </div>
 
         <div className="bg-white dark:bg-slate-950 rounded-2xl p-8 shadow-xl max-w-2xl mx-auto">
-          <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-6 text-center">Why Universal Matters</h3>
+          <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-6 text-center">One workspace across devices</h3>
           <div className="space-y-4">
             {benefits.map((benefit, index) => (
               <div key={index} className="flex items-center space-x-3">

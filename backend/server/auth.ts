@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import type { Request, Response, NextFunction } from "express";
 import type { UserRecord } from "./types.js";
 import { appConfig } from "./config.js";
+import { loadDb } from "./storage.js";
 import { supabase } from "./supabase.js";
 
 const ACCESS_TOKEN_EXPIRES_IN = appConfig.jwtExpiresIn as jwt.SignOptions["expiresIn"];
@@ -44,13 +45,13 @@ const signJwt = (
 
 export const signToken = (user: UserRecord, rememberMe = false) =>
   signJwt(
-    { sub: user.id, role: user.role || "user", typ: "access" },
+    { sub: user.id, role: user.role || "user", typ: "access", version: user.sessionVersion ?? 0 },
     rememberMe ? REMEMBER_ME_TOKEN_EXPIRES_IN : ACCESS_TOKEN_EXPIRES_IN,
   ).token;
 
 export const signAuthToken = (user: UserRecord, rememberMe = false) =>
   signJwt(
-    { sub: user.id, role: user.role || "user", typ: "access" },
+    { sub: user.id, role: user.role || "user", typ: "access", version: user.sessionVersion ?? 0 },
     rememberMe ? REMEMBER_ME_TOKEN_EXPIRES_IN : ACCESS_TOKEN_EXPIRES_IN,
   );
 
@@ -61,60 +62,16 @@ export const signScopedToken = (
 ) =>
   signJwt({ ...payload, typ: tokenKind }, expiresIn);
 
-const tokenRevocationCache = new Map<string, { value: boolean; expiresAt: number }>();
-const CACHE_TTL_MS = 60 * 1000;
-
 export const revokeToken = async (jti: string, reason = "manual") => {
-  tokenRevocationCache.set(jti, {
-    value: true,
-    expiresAt: Date.now() + CACHE_TTL_MS * 10,
-  });
-
-  const { error } = await supabase.from(revokedTokenTable).insert({
-    jti,
-    reason,
-  });
-
-  if (error && !error.message.toLowerCase().includes("duplicate")) {
-    if (error.message.toLowerCase().includes("could not find the table")) {
-      console.warn("Table 'revoked_tokens' not found in Supabase. Falling back to in-memory token revocation.");
-    } else {
-      throw new Error(`Failed to revoke token: ${error.message}`);
-    }
-  }
+  const { error } = await supabase.from(revokedTokenTable).insert({ jti, reason });
+  if (error && error.code !== "23505") throw new Error("Session revocation unavailable");
 };
 
 export const isTokenRevoked = async (jti: string) => {
-  const cached = tokenRevocationCache.get(jti);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.value;
-  }
-
-  try {
-    const { data, error } = await supabase
-      .from(revokedTokenTable)
-      .select("jti")
-      .eq("jti", jti)
-      .maybeSingle();
-
-    if (error) {
-      if (!error.message.toLowerCase().includes("could not find the table")) {
-        console.error(`Error verifying token revocation for jti ${jti}:`, error.message);
-      }
-      return false;
-    }
-
-    const revoked = Boolean(data?.jti);
-    tokenRevocationCache.set(jti, {
-      value: revoked,
-      expiresAt: Date.now() + CACHE_TTL_MS,
-    });
-
-    return revoked;
-  } catch (err) {
-    console.error(`Failed to verify token revocation for jti ${jti}:`, err);
-    return false;
-  }
+  const { data, error } = await supabase.from(revokedTokenTable)
+    .select("jti").eq("jti", jti).maybeSingle();
+  if (error) throw new Error("Session verification unavailable");
+  return Boolean(data);
 };
 
 export const verifyScopedToken = async (token: string, tokenKind: TokenKind) => {
@@ -124,6 +81,12 @@ export const verifyScopedToken = async (token: string, tokenKind: TokenKind) => 
   }
   if (await isTokenRevoked(payload.jti)) {
     throw new Error("Token revoked");
+  }
+  const db = await loadDb();
+  const owner = db.users.find(user => user.id === payload.sub);
+  if (!owner || (payload.version ?? 0) !== (owner.sessionVersion ?? 0) ||
+      (appConfig.isProduction && owner.preferences.twoFactorEnabled)) {
+    throw new Error("Session requires reauthentication");
   }
   return payload;
 };
@@ -160,7 +123,7 @@ const parseCookieHeader = (cookieHeader?: string | null) => {
     const key = cookiePart.slice(0, separatorIndex).trim();
     const value = cookiePart.slice(separatorIndex + 1).trim();
     if (key) {
-      accumulator[key] = decodeURIComponent(value);
+      try { accumulator[key] = decodeURIComponent(value); } catch { /* Ignore malformed cookies. */ }
     }
     return accumulator;
   }, {});

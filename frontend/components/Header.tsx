@@ -76,7 +76,7 @@ const Header = () => {
             <Logo size="sm" />
           </Link>
 
-          <nav className="hidden md:flex items-center space-x-3">
+          <nav className="hidden lg:flex items-center space-x-3">
             {navItems.map((item) => (
               item.type === 'section' ? (
                 <button
@@ -107,7 +107,7 @@ const Header = () => {
             ))}
           </nav>
 
-          <div className="hidden md:flex items-center space-x-4">
+          <div className="hidden lg:flex items-center space-x-4">
             {user ? (
               <div className="flex items-center space-x-3">
                 <Link to="/dashboard">
@@ -115,7 +115,7 @@ const Header = () => {
                     Dashboard
                   </Button>
                 </Link>
-                <span className="text-sm font-medium text-gray-700 dark:text-slate-100">Welcome, {displayName}</span>
+                <span className="max-w-36 truncate text-sm font-medium text-gray-700 dark:text-slate-100">Welcome, {displayName}</span>
                 <Button variant="ghost" onClick={signOut} className="text-gray-700 dark:text-slate-100 dark:hover:bg-slate-800 hover:text-unilink-600">
                   <LogOut className="w-4 h-4 mr-2" />
                   Sign Out
@@ -134,7 +134,8 @@ const Header = () => {
           </div>
 
           <button
-            className="md:hidden text-slate-800 dark:text-slate-100"
+            type="button" aria-label={isMenuOpen ? "Close menu" : "Open menu"} aria-expanded={isMenuOpen}
+            className="grid size-11 place-items-center lg:hidden text-slate-800 dark:text-slate-100"
             onClick={() => setIsMenuOpen(!isMenuOpen)}
           >
             {isMenuOpen ? <X size={24} /> : <Menu size={24} />}
@@ -142,7 +143,7 @@ const Header = () => {
         </div>
 
         {isMenuOpen && (
-          <div className="md:hidden py-4 border-t border-gray-200 dark:border-slate-800 dark:bg-slate-950">
+          <div className="lg:hidden py-4 border-t border-gray-200 dark:border-slate-800 dark:bg-slate-950">
             <nav className="flex flex-col space-y-4">
               <button type="button" className="text-left text-gray-700 dark:text-slate-200 hover:text-unilink-600" onClick={() => goToSection('features')}>Features</button>
               <button type="button" className="text-left text-gray-700 dark:text-slate-200 hover:text-unilink-600" onClick={() => goToSection('compatibility')}>Compatibility</button>

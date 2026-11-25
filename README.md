@@ -21,6 +21,12 @@ All across platforms like **Windows, macOS, Linux, Android, iOS, and browsers**.
 
 ---
 
+## Install UniLink
+
+Choose **Download UniLink** on the website or open `/install`. The same account works in the browser and the installed app. The app opens the dashboard and prompts signed-out users to sign in.
+
+The production build includes the web manifest, launcher icons, and service worker. Serve it over HTTPS for installation on other devices. To check it locally, run `npm run build` and `npm run preview -w frontend`, then open the localhost address. An offline launch shows a retry screen. Sync, authentication, and transfers use the online service.
+
 ## 🎯 Key Features
 
 ### 🔗 QR-Based Device Pairing
@@ -146,3 +152,7 @@ Use Node 22.9 or newer and run the build and start commands from the repository 
 Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and `SMTP_FROM` in the Render service environment. Use a sender authorized by your mail provider. For Mailtrap Email Sending, a Mailtrap SMTP hostname with username `api` selects the HTTPS delivery path. Signup and password recovery require email delivery in production. Codes expire after ten minutes, and resending replaces the previous code.
 
 After deploying, register with an inbox you control, sign out, sign in again, and complete password recovery using the new email code. Keep service credentials in Render environment settings.
+
+### Production storage and authentication
+
+Apply `backend/revoked_tokens.sql` to the Supabase project before starting the service. Keep the account database, file, and session buckets private and restrict object access to the backend service role. Production startup checks the bucket visibility and revocation table. Deploy a single backend instance while the account database uses object storage and an in-process write lock. Configure the exact HTTPS frontend origin in `ALLOWED_ORIGINS` and `APP_BASE_URL`. Phone verification and subscription activation require real provider integrations before they can be enabled in production.

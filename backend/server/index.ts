@@ -1,3 +1,5 @@
+import "express-async-errors";
+import { verifyProductionStorage } from "./supabase.js";
 import express, { type NextFunction, type Response } from "express";
 import { fileTypeFromBuffer } from "file-type";
 import { randomInt, randomUUID } from "node:crypto";
@@ -142,29 +144,29 @@ const clipboardSchema = z.object({
 const vaultSchema = z.object({
   item_type: z.enum(["clipboard", "file", "note"]),
   encrypted_content: z.string().min(1).max(50000),
-  metadata: z.record(z.any()).optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
   tags: z.array(z.string().trim().min(1).max(40)).max(10).optional(),
 });
 
 const aiRequestSchema = z.object({
   content: z.string().min(1).max(20000),
   type: z.enum(["clipboard_analysis", "file_organization", "device_recommendation", "workflow_automation", "content_categorization"]),
-  context: z.record(z.any()).optional(),
+  context: z.record(z.string(), z.any()).optional(),
 });
 
 const sessionTransferSchema = z.object({
-  sessionId: z.string().trim().min(1).max(160),
+  sessionId: z.string().trim().regex(/^[A-Za-z0-9_-]{1,160}$/),
   file: z.string().min(1),
 });
 
 const sessionIdSchema = z.object({
-  sessionId: z.string().trim().min(1).max(160),
+  sessionId: z.string().trim().regex(/^[A-Za-z0-9_-]{1,160}$/),
 });
 
 const bluetoothSchema = z.object({
   bluetooth_mac: z.string().trim().min(1).max(120),
   device_name: z.string().trim().min(1).max(120),
-  device_capabilities: z.record(z.any()).default({}),
+  device_capabilities: z.record(z.string(), z.any()).default({}),
   signal_strength: z.number().int().min(-120).max(20).optional(),
   pairing_status: z.enum(["discovered", "pairing", "paired", "trusted", "blocked"]).default("discovered"),
 });
@@ -879,6 +881,8 @@ const getAppBaseUrl = (req: express.Request) => {
     return configured.replace(/\/$/, "");
   }
 
+  if (isProduction) return appConfig.allowedOrigins[0];
+
   const originHeader = req.headers.origin;
   const origin = Array.isArray(originHeader) ? originHeader[0] : originHeader;
   if (origin) {
@@ -914,6 +918,7 @@ const firstHeaderValue = (value: string | string[] | undefined) => {
 // split deployment the Origin is the frontend host, which made chunked
 // download/preview links point at the static frontend and 404.
 const getApiBaseUrl = (req: express.Request) => {
+  if (isProduction) return process.env.RENDER_EXTERNAL_URL || appConfig.appBaseUrl || appConfig.allowedOrigins[0];
   const forwardedHost = firstHeaderValue(req.headers["x-forwarded-host"]);
   const host = forwardedHost || firstHeaderValue(req.headers.host);
   const protocol = firstHeaderValue(req.headers["x-forwarded-proto"]) || req.protocol || "http";
@@ -1143,6 +1148,11 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
       return;
     }
 
+    if (isProduction && user.preferences.twoFactorEnabled) {
+      res.status(403).json({ error: "Sign-in requires second-factor verification. Contact support for account recovery." });
+      return;
+    }
+
     if (refreshUserPlan(user)) {
       await saveDb(db);
     }
@@ -1273,6 +1283,8 @@ app.post("/api/auth/reset-password", authLimiter, async (req, res) => {
       res.status(400).json({ error: "Invalid or expired code. Check your email or request another code." });
       return;
     }
+    user.sessionVersion = (user.sessionVersion ?? 0) + 1;
+    db.pairSessions = db.pairSessions.filter(session => session.userId !== user.id);
     user.passwordHash = await hashPassword(parsed.data.password);
     user.updatedAt = nowIso();
     db.emailVerifications = db.emailVerifications.filter(entry => entry.id !== code.id);
@@ -1318,11 +1330,16 @@ app.post("/api/auth/change-password", requireAuth, requireCsrf, async (req: Auth
       return;
     }
 
+    user.sessionVersion = (user.sessionVersion ?? 0) + 1;
+    db.pairSessions = db.pairSessions.filter(session => session.userId !== user.id);
     user.passwordHash = await hashPassword(parsed.data.newPassword);
     user.updatedAt = nowIso();
     await saveDb(db);
 
-    res.json({ success: true, message: "Password changed successfully." });
+    const { token } = signAuthToken(user);
+    const csrfToken = createCsrfToken();
+    setAuthCookies(res, token, csrfToken);
+    res.json({ success: true, token, csrfToken, message: "Password changed successfully." });
   } catch (error) {
     console.error("Change password error:", error);
     res.status(500).json({ error: "Unable to change password right now." });
@@ -1352,7 +1369,11 @@ app.post("/api/auth/refresh", refreshLimiter, requireAuth, requireCsrf, async (r
   });
 });
 
-app.post("/api/auth/request-2fa-otp", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.post("/api/auth/request-2fa-otp", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
+  if (isProduction) {
+    res.status(503).json({ error: "Phone verification is unavailable." });
+    return;
+  }
   const parsed = twoFactorRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Enter a valid mobile number." });
@@ -1392,7 +1413,11 @@ app.post("/api/auth/request-2fa-otp", requireAuth, async (req: AuthenticatedRequ
   }
 });
 
-app.post("/api/auth/verify-2fa-otp", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.post("/api/auth/verify-2fa-otp", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
+  if (isProduction) {
+    res.status(503).json({ error: "Phone verification is unavailable." });
+    return;
+  }
   const parsed = twoFactorVerifySchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Enter the 6-digit OTP." });
@@ -1438,7 +1463,7 @@ app.post("/api/auth/verify-2fa-otp", requireAuth, async (req: AuthenticatedReque
   }
 });
 
-app.post("/api/auth/disable-2fa", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.post("/api/auth/disable-2fa", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   try {
     const db = await loadDb();
     const user = db.users.find((entry) => entry.id === req.auth!.userId);
@@ -1474,6 +1499,10 @@ app.get("/api/auth/me", requireAuth, async (req: AuthenticatedRequest, res) => {
 });
 
 app.post("/api/billing/subscribe", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
+  if (isProduction) {
+    res.status(503).json({ error: "Paid subscriptions are unavailable until payment verification is configured." });
+    return;
+  }
   const parsed = billingSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid subscription request" });
@@ -1500,7 +1529,7 @@ app.post("/api/billing/subscribe", requireAuth, requireCsrf, async (req: Authent
   });
 });
 
-app.post("/api/pair-sessions", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.post("/api/pair-sessions", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const db = await loadDb();
   db.pairSessions = db.pairSessions.filter((session) => !isPairSessionExpired(session));
   const appBaseUrl = getAppBaseUrl(req);
@@ -1708,7 +1737,7 @@ app.post("/api/devices", requireAuth, requireCsrf, async (req: AuthenticatedRequ
   res.status(201).json(device);
 });
 
-app.patch("/api/devices/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.patch("/api/devices/:id", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const db = await loadDb();
   const device = db.devices.find(
     (entry) => entry.id === req.params.id && entry.userId === req.auth!.userId,
@@ -1727,7 +1756,7 @@ app.patch("/api/devices/:id", requireAuth, async (req: AuthenticatedRequest, res
   res.json(device);
 });
 
-app.delete("/api/devices/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.delete("/api/devices/:id", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const db = await loadDb();
   db.devices = db.devices.filter(
     (entry) => !(entry.id === req.params.id && entry.userId === req.auth!.userId),
@@ -2285,7 +2314,7 @@ app.post("/api/file-transfers/complete-upload", uploadLimiter, requireAuth, requ
   void finalizeUpload().catch(() => undefined);
 });
 
-app.post("/api/auth/logout", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.post("/api/auth/logout", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   await revokeToken(req.auth!.jti, "logout");
   clearAuthCookies(res);
   res.status(204).send();
@@ -2601,6 +2630,7 @@ const streamChunkedTransferDownload = async (
   const contentLength = end - start + 1;
 
   res.status(range ? 206 : 200);
+  res.setHeader("Content-Security-Policy", "sandbox; default-src 'none'");
   res.setHeader("Content-Type", sanitizeMimeType(transfer.fileType));
   res.setHeader(
     "Content-Disposition",
@@ -2716,7 +2746,7 @@ const getTransferDownloadLink = async (
     params.set(
       "token",
       signScopedToken(
-        { sub: userId, fileId: transfer.id },
+        { sub: userId, fileId: transfer.id, version: db.users.find(user => user.id === userId)?.sessionVersion ?? 0 },
         "download",
         `${appConfig.downloadTokenTtlHours}h`,
       ).token,
@@ -2808,7 +2838,7 @@ app.get("/api/vault", requireAuth, async (req: AuthenticatedRequest, res) => {
   );
 });
 
-app.post("/api/vault", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.post("/api/vault", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const parsed = vaultSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid vault payload" });
@@ -2832,7 +2862,7 @@ app.post("/api/vault", requireAuth, async (req: AuthenticatedRequest, res) => {
   res.status(201).json(item);
 });
 
-app.delete("/api/vault/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.delete("/api/vault/:id", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const db = await loadDb();
   db.vault = db.vault.filter(
     (entry) => !(entry.id === req.params.id && entry.userId === req.auth!.userId),
@@ -2915,7 +2945,7 @@ app.get("/api/ai-suggestions", requireAuth, async (req: AuthenticatedRequest, re
   );
 });
 
-app.post("/api/ai-assistant", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.post("/api/ai-assistant", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const parsed = aiRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid AI assistant request" });
@@ -2931,7 +2961,7 @@ app.post("/api/ai-assistant", requireAuth, async (req: AuthenticatedRequest, res
   res.status(201).json(suggestion);
 });
 
-app.patch("/api/ai-suggestions/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.patch("/api/ai-suggestions/:id", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const db = await loadDb();
   const suggestion = db.aiSuggestions.find(
     (entry) => entry.id === req.params.id && entry.userId === req.auth!.userId,
@@ -2954,7 +2984,7 @@ app.patch("/api/ai-suggestions/:id", requireAuth, async (req: AuthenticatedReque
   res.json(suggestion);
 });
 
-app.post("/api/ai-suggestions/:id/feedback", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.post("/api/ai-suggestions/:id/feedback", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const db = await loadDb();
   const suggestion = db.aiSuggestions.find(
     (entry) => entry.id === req.params.id && entry.userId === req.auth!.userId,
@@ -2968,7 +2998,7 @@ app.post("/api/ai-suggestions/:id/feedback", requireAuth, async (req: Authentica
   res.json(suggestion);
 });
 
-app.delete("/api/ai-suggestions/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.delete("/api/ai-suggestions/:id", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const db = await loadDb();
   db.aiSuggestions = db.aiSuggestions.filter(
     (entry) => !(entry.id === req.params.id && entry.userId === req.auth!.userId),
@@ -2977,7 +3007,7 @@ app.delete("/api/ai-suggestions/:id", requireAuth, async (req: AuthenticatedRequ
   res.status(204).send();
 });
 
-app.patch("/api/user/preferences", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.patch("/api/user/preferences", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const db = await loadDb();
   const user = db.users.find((entry) => entry.id === req.auth!.userId);
   if (!user) {
@@ -2989,7 +3019,7 @@ app.patch("/api/user/preferences", requireAuth, async (req: AuthenticatedRequest
   }
   user.updatedAt = nowIso();
   await saveDb(db);
-  res.json({ preferences: user.preferences });
+  res.json({ preferences: { aiAssistantEnabled: user.preferences.aiAssistantEnabled } });
 });
 
 app.post("/api/sync/trigger", syncLimiter, requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
@@ -3012,7 +3042,7 @@ app.get("/api/bluetooth-devices", requireAuth, async (req: AuthenticatedRequest,
   res.json(devices);
 });
 
-app.post("/api/bluetooth-devices", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.post("/api/bluetooth-devices", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const parsed = bluetoothSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid bluetooth payload" });
@@ -3048,7 +3078,7 @@ app.post("/api/bluetooth-devices", requireAuth, async (req: AuthenticatedRequest
   res.status(201).json(record);
 });
 
-app.patch("/api/bluetooth-devices/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.patch("/api/bluetooth-devices/:id", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const db = await loadDb();
   const device = db.bluetoothDevices.find(
     (entry) => entry.id === req.params.id && entry.userId === req.auth!.userId,
@@ -3068,7 +3098,7 @@ app.patch("/api/bluetooth-devices/:id", requireAuth, async (req: AuthenticatedRe
   res.json(device);
 });
 
-app.delete("/api/bluetooth-devices/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.delete("/api/bluetooth-devices/:id", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const db = await loadDb();
   db.bluetoothDevices = db.bluetoothDevices.filter(
     (entry) => !(entry.id === req.params.id && entry.userId === req.auth!.userId),
@@ -3094,7 +3124,7 @@ app.delete("/api/file-transfers/:id", syncLimiter, requireAuth, requireCsrf, asy
 // 🔥 REAL-TIME FILE TRANSFER (SESSION BASED)
 // Uses Supabase Storage so files survive server restarts on Render.
 
-app.post("/api/send", requireAuth, async (req, res) => {
+app.post("/api/send", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const parsed = sessionTransferSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid session transfer payload" });
@@ -3104,7 +3134,7 @@ app.post("/api/send", requireAuth, async (req, res) => {
     const buffer = Buffer.from(parsed.data.file, "base64");
     const { error } = await supabase.storage
       .from(SESSION_BUCKET)
-      .upload(`sessions/${parsed.data.sessionId}`, buffer, {
+      .upload(`sessions/${req.auth!.userId}/${parsed.data.sessionId}`, buffer, {
         contentType: "application/octet-stream",
         upsert: true,
       });
@@ -3121,7 +3151,7 @@ app.post("/api/send", requireAuth, async (req, res) => {
   }
 });
 
-app.get("/api/receive/:sessionId", requireAuth, async (req, res) => {
+app.get("/api/receive/:sessionId", requireAuth, async (req: AuthenticatedRequest, res) => {
   const parsed = sessionIdSchema.safeParse(req.params);
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid session identifier" });
@@ -3130,7 +3160,7 @@ app.get("/api/receive/:sessionId", requireAuth, async (req, res) => {
   try {
     const { data, error } = await supabase.storage
       .from(SESSION_BUCKET)
-      .download(`sessions/${parsed.data.sessionId}`);
+      .download(`sessions/${req.auth!.userId}/${parsed.data.sessionId}`);
 
     if (error || !data) {
       return res.status(404).json({ error: "No file yet" });
@@ -3142,7 +3172,7 @@ app.get("/api/receive/:sessionId", requireAuth, async (req, res) => {
     // Delete after retrieval (one-time pickup)
     supabase.storage
       .from(SESSION_BUCKET)
-      .remove([`sessions/${parsed.data.sessionId}`])
+      .remove([`sessions/${req.auth!.userId}/${parsed.data.sessionId}`])
       .catch((err: unknown) => console.error("Session cleanup error:", err));
 
     res.json({ file });
@@ -3162,7 +3192,15 @@ const FRONTEND_DIST = path.resolve(
 );
 
 if (isProduction) {
-  app.use(express.static(FRONTEND_DIST, { index: "index.html", maxAge: "1d" }));
+  app.use(express.static(FRONTEND_DIST, {
+    index: "index.html",
+    maxAge: "1d",
+    setHeaders(res, file) {
+      if (["index.html", "manifest.webmanifest", "sw.js", "offline.html"].includes(path.basename(file))) {
+        res.setHeader("Cache-Control", "no-cache");
+      }
+    },
+  }));
 }
 
 app.use(createErrorHandler());
@@ -3206,7 +3244,8 @@ process.on("uncaughtException", (error) => {
   shutdown("uncaughtException");
 });
 
-ensureDataDirs()
+verifyProductionStorage()
+  .then(ensureDataDirs)
   .then(ensureConfiguredAdmin)
   .then(() => {
     server = app.listen(port, () => {

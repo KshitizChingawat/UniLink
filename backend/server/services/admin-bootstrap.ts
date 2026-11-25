@@ -41,6 +41,8 @@ export const ensureConfiguredAdmin = async () => {
       changed = true;
     }
     if (!(await comparePassword(appConfig.adminPassword, user.passwordHash))) {
+      user.sessionVersion = (user.sessionVersion ?? 0) + 1;
+      db.pairSessions = db.pairSessions.filter(session => session.userId !== user.id);
       user.passwordHash = await hashPassword(appConfig.adminPassword);
       changed = true;
     }

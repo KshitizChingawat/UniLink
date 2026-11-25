@@ -33,7 +33,7 @@ const CallToAction = () => {
             <DemoVideo className="border-white text-white hover:bg-white hover:text-unilink-600" />
           </div>
 
-          <div className="flex items-center justify-center space-x-8 text-blue-100">
+          <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-blue-100">
             <div className="flex items-center space-x-2">
               <Users className="w-5 h-5" />
               <span>100,000+ active users</span>

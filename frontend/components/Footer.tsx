@@ -3,7 +3,10 @@ import { Github, Twitter, Mail } from 'lucide-react';
 import { Link } from 'wouter';
 import Logo from './Logo';
 
+import { useAppInstall } from '@/lib/app-install';
+
 const Footer = () => {
+  const { standalone } = useAppInstall();
   return (
     <footer className="bg-gray-900 dark:bg-slate-950 text-white py-16 transition-colors duration-300">
       <div className="container mx-auto px-4 sm:px-6 lg:px-8">
@@ -34,7 +37,7 @@ const Footer = () => {
             <ul className="space-y-2 text-gray-400">
               <li><Link to="/product" className="hover:text-white transition-colors">Features</Link></li>
               <li><Link to="/pricing" className="hover:text-white transition-colors">Pricing</Link></li>
-              <li><Link to="/product" className="hover:text-white transition-colors">Download</Link></li>
+              {!standalone && <li><Link to="/install" className="hover:text-white transition-colors">Download UniLink</Link></li>}
               <li><Link to="/product" className="hover:text-white transition-colors">Changelog</Link></li>
             </ul>
           </div>

@@ -1,6 +1,7 @@
 import { Route, Switch } from "wouter";
 import { Toaster } from "sonner";
 import Index from "@/pages/Index";
+import Install from "@/pages/Install";
 import Login from "@/pages/Login";
 import Register from "@/pages/Register";
 import Dashboard from "@/pages/Dashboard";
@@ -22,7 +23,7 @@ const WakeUpBanner = () => {
 
   if (status === 'error') {
     return (
-      <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-5 py-3 shadow-lg text-sm text-red-700">
+      <div className="pointer-events-none fixed bottom-4 w-max max-w-[calc(100%-2rem)] left-1/2 -translate-x-1/2 z-[9999] flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-5 py-3 shadow-lg text-sm text-red-700">
         <span className="text-base">⚠️</span>
         <span>Server unavailable. Please try again in a moment.</span>
       </div>
@@ -30,7 +31,7 @@ const WakeUpBanner = () => {
   }
 
   return (
-    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[9999] flex items-center gap-3 rounded-xl border border-blue-200 bg-white px-5 py-3 shadow-lg text-sm text-gray-700">
+    <div className="pointer-events-none fixed bottom-4 w-max max-w-[calc(100%-2rem)] left-1/2 -translate-x-1/2 z-[9999] flex items-center gap-3 rounded-xl border border-blue-200 bg-white px-5 py-3 shadow-lg text-sm text-gray-700">
       <svg className="h-4 w-4 animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4l-3 3 3 3H4a8 8 0 01-8-8z" />
@@ -48,6 +49,7 @@ const App = () => {
       <WakeUpBanner />
       <Switch>
         <Route path="/" component={Index} />
+        <Route path="/install" component={Install} />
         <Route path="/login" component={Login} />
         <Route path="/register" component={Register} />
         <Route path="/connect/:code" component={ConnectDevice} />

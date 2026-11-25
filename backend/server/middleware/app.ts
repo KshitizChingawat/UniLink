@@ -3,7 +3,7 @@ import express, { type Express } from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { appConfig } from "../config.js";
-import { rejectDisallowedOrigin } from "../http.js";
+import { HttpError, rejectDisallowedOrigin } from "../http.js";
 import { httpLogger, logger } from "../logger.js";
 
 export const rateLimits = {
@@ -14,15 +14,6 @@ export const rateLimits = {
   fileList: rateLimit({ windowMs: 60 * 60 * 1000, max: 20_000, standardHeaders: true, legacyHeaders: false, message: { error: "Too many file listing requests. Please try again later." } }),
   sync: rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false, message: { error: "Too many sync requests. Please try again later." } }),
   upload: rateLimit({ windowMs: 15 * 60 * 1000, max: 5000, standardHeaders: true, legacyHeaders: false, message: { error: "Too many upload requests. Please wait before uploading again." } }),
-};
-
-const isTrustedProductionOrigin = (origin: string) => {
-  try {
-    const hostname = new URL(origin).hostname.toLowerCase();
-    return hostname.endsWith(".onrender.com") && hostname.includes("unilink");
-  } catch {
-    return false;
-  }
 };
 
 const isLocalDevelopmentOrigin = (origin: string) => {
@@ -47,13 +38,12 @@ export const configureApp = (app: Express) => {
       if (
         !origin ||
         allowedOrigins.includes(origin) ||
-        (!isProduction && isLocalDevelopmentOrigin(origin)) ||
-        (isProduction && isTrustedProductionOrigin(origin))
+        (!isProduction && isLocalDevelopmentOrigin(origin))
       ) {
         callback(null, true);
         return;
       }
-      callback(new Error("Origin not allowed by CORS"));
+      callback(new HttpError(403, "Origin not allowed by CORS"));
     },
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-File-Name", "X-File-Size", "X-File-Type", "X-Sender-Device-Id", "X-Receiver-Device-Id", "X-Transfer-Method", "X-Upload-Id", "X-Chunk-Index", "X-Total-Chunks", "X-CSRF-Token"],
@@ -66,7 +56,7 @@ export const configureApp = (app: Express) => {
     crossOriginResourcePolicy: false,
     contentSecurityPolicy: { directives: {
       defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-      fontSrc: ["'self'", "https://fonts.gstatic.com"], imgSrc: ["'self'", "data:", "blob:", "https://api.qrserver.com", supabaseOrigin, supabaseStorageOrigin],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"], imgSrc: ["'self'", "data:", "blob:", supabaseOrigin, supabaseStorageOrigin],
       mediaSrc: ["'self'", "blob:", supabaseOrigin, supabaseStorageOrigin], connectSrc: ["'self'", ...allowedOrigins, supabaseOrigin, supabaseStorageOrigin],
       objectSrc: ["'none'"], baseUri: ["'self'"], frameAncestors: ["'none'"], formAction: ["'self'"],
     } },

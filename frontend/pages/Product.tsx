@@ -1,3 +1,4 @@
+import DownloadButton from '@/components/DownloadButton';
 import Header from '@/components/Header';
 import Footer from '@/components/Footer';
 import { Download, Rocket, ScrollText, Sparkles } from 'lucide-react';
@@ -26,7 +27,7 @@ const Product = () => {
             {
               icon: Download,
               title: 'Download',
-              description: 'Desktop and mobile builds are represented in the unified download picker across the site.',
+              description: 'Add UniLink to your phone, tablet, or computer from your browser.',
             },
             {
               icon: ScrollText,
@@ -42,6 +43,7 @@ const Product = () => {
                 </div>
                 <h2 className="text-2xl font-semibold text-slate-900">{item.title}</h2>
                 <p className="mt-3 text-slate-600">{item.description}</p>
+                {item.title === 'Download' && <DownloadButton className="mt-4" />}
               </div>
             );
           })}

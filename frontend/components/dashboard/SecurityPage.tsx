@@ -130,10 +130,11 @@ const SecurityPage = () => {
 
     setChangingPassword(true);
     try {
-      const data = await apiFetch<{ message: string }>('/api/auth/change-password', {
+      const data = await apiFetch<{ message: string; token: string }>('/api/auth/change-password', {
         method: 'POST',
         body: JSON.stringify(passwordForm),
       });
+      localStorage.setItem("auth_token", data.token);
       toast.success(data.message);
       setPasswordForm({
         currentPassword: '',

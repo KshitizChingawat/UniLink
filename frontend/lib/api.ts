@@ -28,25 +28,7 @@ const getHeuristicApiBaseUrls = () => {
     const currentOrigin = normalizeBaseUrl(window.location.origin);
     if (currentOrigin) bases.add(currentOrigin);
 
-    try {
-      const parsed = new URL(currentOrigin);
-      const host = parsed.hostname;
-      const protocol = parsed.protocol;
-      const port = parsed.port ? `:${parsed.port}` : "";
-      const replacements = [
-        host.replace(/frontend/i, "backend"),
-        host.replace(/frontend/i, "api"),
-        host.replace(/^app-/i, "api-"),
-      ];
 
-      for (const replacement of replacements) {
-        if (replacement && replacement !== host) {
-          bases.add(`${protocol}//${replacement}${port}`);
-        }
-      }
-    } catch {
-      // Ignore malformed browser origins and fall back to the direct origin.
-    }
   }
 
   if (import.meta.env.DEV && !bases.size) {
