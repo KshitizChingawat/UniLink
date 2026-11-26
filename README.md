@@ -23,9 +23,9 @@ All across platforms like **Windows, macOS, Linux, Android, iOS, and browsers**.
 
 ## Install UniLink
 
-Choose **Download UniLink** on the website or open `/install`. The same account works in the browser and the installed app. The app opens the dashboard and prompts signed-out users to sign in.
+Open `/install` on the website. On Android 8 or later, choose **Download UniLink APK** and open the file to install the app. Android lists UniLink in Settings → Apps, where it can be uninstalled. On desktop, the browser installation option is available. On iPhone and iPad, the website offers Safari home-screen access until an Apple-signed native distribution link is configured.
 
-The production build includes the web manifest, launcher icons, and service worker. Serve it over HTTPS for installation on other devices. To check it locally, run `npm run build` and `npm run preview -w frontend`, then open the localhost address. An offline launch shows a retry screen. Sync, authentication, and transfers use the online service.
+The native clients open the hosted UniLink workspace and use your existing account. Android release signing and iOS build instructions are in [the mobile guide](mobile/README.md).
 
 ## 🎯 Key Features
 

@@ -21,16 +21,19 @@ function currentDevice(): Device {
   return 'desktop';
 }
 
+const iosReleaseUrl = (import.meta.env.VITE_IOS_INSTALL_URL ?? '').trim();
+const hasIosRelease = /^https:\/\/(?:testflight\.apple\.com\/join\/[A-Za-z0-9]+|apps\.apple\.com\/[^\s]+)$/.test(iosReleaseUrl);
+
 function installGuide(device: Device) {
-  if (device === 'ios') return { title: 'Add to your Home Screen', steps: [
-    'Open this page in Safari and tap Share. Depending on your toolbar, Share may be under the page menu.',
-    'Choose Add to Home Screen. If prompted, turn on Open as Web App.',
-    'Tap Add. Open UniLink from its Home Screen icon.',
-  ] };
-  if (device === 'android') return { title: 'Install on Android', steps: [
-    'Open this page in Chrome on your phone or tablet.',
-    'Open the three-dot menu and choose Add to home screen, then Install if offered.',
-    'Confirm and open UniLink from your launcher.',
+  if (device === 'ios') return { title: 'UniLink for iPhone and iPad', steps: hasIosRelease ? [
+    'Open the Apple distribution link on your iPhone or iPad.',
+    'Follow the prompts in TestFlight or the App Store to install UniLink.',
+    'Launch UniLink from your App Library. To uninstall it, touch and hold its icon and choose Delete App.',
+  ] : [] };
+  if (device === 'android') return { title: 'UniLink for Android', steps: [
+    'Download the signed UniLink APK on your Android phone or tablet.',
+    'Open UniLink.apk from Downloads and tap Install. If Android asks, allow this browser to install this app.',
+    'Tap Open or find UniLink in your app drawer. To remove it, open its App info and tap Uninstall.',
   ] };
   if (/Macintosh/.test(navigator.userAgent) && /^((?!chrome|android|edg).)*safari/i.test(navigator.userAgent)) {
     return { title: 'Add to your Dock', steps: [
@@ -52,9 +55,10 @@ function Install() {
   const [selected, setSelected] = useState<Device>(device);
   const [feedback, setFeedback] = useState('');
   const { canPrompt, installed, standalone } = useAppInstall();
-  const ready = installed || standalone;
+  const native = /\bUniLinkNative\/1\b/.test(navigator.userAgent);
+  const ready = native || ((installed || standalone) && selected === 'desktop');
   const guide = installGuide(selected);
-  const showQR = device === 'desktop' && location.protocol === 'https:' && !standalone;
+  const showQR = device === 'desktop' && location.protocol === 'https:' && !standalone && !native;
 
   async function install() {
     const result = await requestInstall();
@@ -100,14 +104,22 @@ function Install() {
                 </TabsList>
                 <TabsContent key={selected} value={selected} className="mt-7 motion-safe:animate-fade-in">
                   <h3 className="text-2xl font-bold leading-tight tracking-tight">{guide.title}</h3>
-                  {selected === device && canPrompt && <Button size="lg" className="mt-4 w-full sm:w-auto" onClick={install}><Download />Install on this device</Button>}
+                  {selected === 'android' && <Button asChild size="lg" className="mt-4 w-full sm:w-auto">
+                    <a href="/downloads/UniLink.apk" download="UniLink.apk"><Download />Download UniLink APK</a>
+                  </Button>}
+                  {selected === 'ios' && (hasIosRelease ? <Button asChild size="lg" className="mt-4">
+                    <a href={iosReleaseUrl}>Get the iOS app<ArrowRight /></a>
+                  </Button> : <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                    The iOS app is awaiting a signed release. For now, use UniLink in Safari. To add the web version to your Home Screen, tap Share, then Add to Home Screen.
+                  </p>)}
+                  {selected === 'desktop' && selected === device && canPrompt && <Button size="lg" className="mt-4 w-full sm:w-auto" onClick={install}><Download />Install on this device</Button>}
                   <p className="mt-3 text-sm text-muted-foreground" role="status">{feedback}</p>
-                  <ol className="mt-4 space-y-4">
+                  {guide.steps.length > 0 && <ol className="mt-4 space-y-4">
                     {guide.steps.map((step, index) => <li key={step} className="grid grid-cols-[1.75rem_1fr] gap-3">
                       <span aria-hidden="true" className="grid size-7 place-items-center rounded-full bg-blue-50 text-xs font-bold text-blue-700 dark:bg-blue-950 dark:text-blue-200">{index + 1}</span>
                       <span className="pt-0.5 text-sm leading-6 text-slate-700 dark:text-slate-200">{step}</span>
                     </li>)}
-                  </ol>
+                  </ol>}
                 </TabsContent>
               </Tabs>
               <p className="mt-7 border-t pt-4 text-sm leading-relaxed text-muted-foreground">
