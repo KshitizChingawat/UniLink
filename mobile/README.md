@@ -19,4 +19,4 @@ The first local release key and password are stored in the Git-ignored `mobile/s
 
 Open `ios/UniLink.xcodeproj` on a Mac with Xcode. Select the UniLink target, set the signing team and an available bundle identifier under **Signing & Capabilities**, and choose a connected development device to run the app. The deployment target is iOS 16.
 
-For distribution, archive the app in Xcode and distribute it through TestFlight or the App Store. Once Apple provides a release link, set `VITE_IOS_INSTALL_URL` to the public TestFlight invitation or App Store URL when building the web frontend. The website displays the iOS download button when a release link is configured. Before then it offers the Safari web version.
+For distribution, archive the app in Xcode and distribute it through TestFlight or the App Store. Once Apple provides a release link, set `VITE_IOS_INSTALL_URL` to the public TestFlight invitation or App Store URL when building the web frontend. The website displays the iOS download button when a release link is configured. The Safari Home Screen installation steps are available with or without a native release.

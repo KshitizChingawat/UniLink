@@ -1,4 +1,5 @@
 import "express-async-errors";
+import { startSms, checkSms, smsConfigured } from "./sms.js";
 import { verifyProductionStorage } from "./supabase.js";
 import express, { type NextFunction, type Response } from "express";
 import { fileTypeFromBuffer } from "file-type";
@@ -76,11 +77,14 @@ const changePasswordSchema = z
   });
 
 const twoFactorRequestSchema = z.object({
-  mobileNumber: z.string().trim().min(8).max(24),
+  mobileNumber: z.string().max(32).optional(),
+  currentPassword: z.string().min(1).max(128),
+  purpose: z.enum(["enable", "disable"]),
 });
 
 const twoFactorVerifySchema = z.object({
-  otp: z.string().trim().length(6),
+  challengeId: z.string().uuid(),
+  otp: z.string().regex(/^\d{4,10}$/),
 });
 
 const registrationOtpRequestSchema = z.object({
@@ -278,9 +282,6 @@ const createOtp = () => `${randomInt(100000, 1000000)}`;
 
 const isStrongPassword = (password: string) =>
   password.length >= 8 && /[^A-Za-z0-9]/.test(password);
-
-const isValidMobileNumber = (mobileNumber: string) =>
-  /^\+\d{1,3}\s\d{4}-\d{6}$/.test(mobileNumber.trim());
 
 const getLatestEmailVerification = (
   db: Awaited<ReturnType<typeof loadDb>>,
@@ -529,6 +530,7 @@ const requireDownloadAccess = async (
       userId: payload.sub,
       role: payload.role === "admin" ? "admin" : "user",
       jti: String(payload.jti),
+      mfa: payload.mfa === true,
     };
     next();
   } catch (error) {
@@ -851,7 +853,7 @@ const cleanupStaleUploadSessions = async () => {
 
 const userResponse = (user: UserRecord) => {
   refreshUserPlan(user);
-  return sanitizeUser(user);
+  return { ...sanitizeUser(user), smsVerificationAvailable: smsConfigured() };
 };
 
 const findUser = async (userId: string) => {
@@ -1143,8 +1145,8 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
       return;
     }
 
-    if (isProduction && user.preferences.twoFactorEnabled) {
-      res.status(403).json({ error: "Sign-in requires second-factor verification. Contact support for account recovery." });
+    if (user.preferences.twoFactorEnabled) {
+      res.json(await startSms(db, user, "login", user.preferences.twoFactorPhone ?? "", parsed.data.rememberMe));
       return;
     }
 
@@ -1161,6 +1163,7 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
       user: userResponse(user),
     });
   } catch (error) {
+    if (error instanceof HttpError) throw error;
     console.error("Login lookup error:", error);
     res.status(503).json({ error: "Account storage is temporarily unavailable. Please try signing in again." });
   }
@@ -1211,6 +1214,11 @@ app.post("/api/auth/google", tokenLimiter, async (req, res) => {
 
       db.users.push(user);
       await saveDb(db);
+    }
+
+    if (user.preferences.twoFactorEnabled) {
+      res.status(403).json({ error: "Sign in with your password and SMS code." });
+      return;
     }
 
     if (refreshUserPlan(user)) {
@@ -1331,7 +1339,7 @@ app.post("/api/auth/change-password", requireAuth, requireCsrf, async (req: Auth
     user.updatedAt = nowIso();
     await saveDb(db);
 
-    const { token } = signAuthToken(user);
+    const { token } = signAuthToken(user, false, req.auth!.mfa);
     const csrfToken = createCsrfToken();
     setAuthCookies(res, token, csrfToken);
     res.json({ success: true, token, csrfToken, message: "Password changed successfully." });
@@ -1354,7 +1362,7 @@ app.post("/api/auth/refresh", refreshLimiter, requireAuth, requireCsrf, async (r
   }
 
   const rememberMe = req.body?.rememberMe === true;
-  const { token } = signAuthToken(user, rememberMe);
+  const { token } = signAuthToken(user, rememberMe, req.auth!.mfa);
   const csrfToken = createCsrfToken();
   setAuthCookies(res, token, csrfToken, rememberMe);
   res.json({
@@ -1364,124 +1372,55 @@ app.post("/api/auth/refresh", refreshLimiter, requireAuth, requireCsrf, async (r
   });
 });
 
-app.post("/api/auth/request-2fa-otp", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
-  if (isProduction) {
-    res.status(503).json({ error: "Phone verification is unavailable." });
-    return;
-  }
+function sendVerifiedSession(res: Response, user: UserRecord, rememberMe: boolean) {
+  const { token } = signAuthToken(user, rememberMe, Boolean(user.preferences.twoFactorEnabled));
+  const csrfToken = createCsrfToken();
+  setAuthCookies(res, token, csrfToken, rememberMe);
+  res.json({ token, csrfToken, user: userResponse(user) });
+}
+
+app.post("/api/auth/request-2fa-otp", requireAuth, requireCsrf, tokenLimiter, async (req: AuthenticatedRequest, res) => {
   const parsed = twoFactorRequestSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: "Enter a valid mobile number." });
-    return;
-  }
-
-  const mobileNumber = parsed.data.mobileNumber.trim();
-  if (!isValidMobileNumber(mobileNumber)) {
-    res.status(400).json({ error: "Use the format +91 1234-123456" });
-    return;
-  }
-
-  try {
-    const db = await loadDb();
-    const user = db.users.find((entry) => entry.id === req.auth!.userId);
-    if (!user) {
-      res.status(404).json({ error: "User not found" });
-      return;
-    }
-
-    const otp = createOtp();
-    user.preferences.twoFactorPhone = mobileNumber;
-    user.preferences.twoFactorOtpHash = await hashPassword(otp);
-    user.preferences.twoFactorOtpExpiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-    user.preferences.twoFactorEnabled = false;
-    user.updatedAt = nowIso();
-    await saveDb(db);
-
-    res.json({
-      success: true,
-      message: "Temporary OTP generated for this mobile number.",
-      developmentOtp: otp,
-    });
-  } catch (error) {
-    console.error("Request 2FA OTP error:", error);
-    res.status(500).json({ error: "Unable to generate OTP right now." });
-  }
+  if (!parsed.success) throw new HttpError(400, "Enter your current password and a valid verification request.");
+  const db = await loadDb();
+  const user = db.users.find(entry => entry.id === req.auth!.userId);
+  if (!user || !await comparePassword(parsed.data.currentPassword, user.passwordHash)) throw new HttpError(400, "Current password is incorrect.");
+  const purpose = parsed.data.purpose;
+  if (Boolean(user.preferences.twoFactorEnabled) !== (purpose === "disable")) throw new HttpError(409, "Refresh your security settings and try again.");
+  const phone = purpose === "disable" ? user.preferences.twoFactorPhone : parsed.data.mobileNumber;
+  res.json(await startSms(db, user, purpose, phone ?? ""));
 });
 
-app.post("/api/auth/verify-2fa-otp", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
-  if (isProduction) {
-    res.status(503).json({ error: "Phone verification is unavailable." });
-    return;
-  }
+app.post("/api/auth/verify-2fa-otp", requireAuth, requireCsrf, authLimiter, async (req: AuthenticatedRequest, res) => {
   const parsed = twoFactorVerifySchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: "Enter the 6-digit OTP." });
-    return;
-  }
-
-  try {
-    const db = await loadDb();
-    const user = db.users.find((entry) => entry.id === req.auth!.userId);
-    if (!user) {
-      res.status(404).json({ error: "User not found" });
-      return;
-    }
-
-    const otpHash = user.preferences.twoFactorOtpHash;
-    const expiresAt = user.preferences.twoFactorOtpExpiresAt;
-    if (!otpHash || !expiresAt || new Date(expiresAt).getTime() <= Date.now()) {
-      res.status(400).json({ error: "OTP expired. Request a new OTP." });
-      return;
-    }
-
-    const otpMatches = await comparePassword(parsed.data.otp, otpHash);
-    if (!otpMatches) {
-      res.status(400).json({ error: "Invalid OTP." });
-      return;
-    }
-
-    user.preferences.twoFactorEnabled = true;
-    user.preferences.twoFactorVerifiedAt = nowIso();
-    user.preferences.twoFactorOtpHash = undefined;
-    user.preferences.twoFactorOtpExpiresAt = undefined;
-    user.updatedAt = nowIso();
-    await saveDb(db);
-
-    res.json({
-      success: true,
-      message: "Two-factor authentication enabled successfully.",
-      user: userResponse(user),
-    });
-  } catch (error) {
-    console.error("Verify 2FA OTP error:", error);
-    res.status(500).json({ error: "Unable to verify OTP right now." });
-  }
+  if (!parsed.success) throw new HttpError(400, "Enter the numeric code from your text message.");
+  const db = await loadDb();
+  const user = db.users.find(entry => entry.id === req.auth!.userId);
+  if (!user) throw new HttpError(401, "Session expired.");
+  const enable = !user.preferences.twoFactorEnabled;
+  const challenge = await checkSms(user, enable ? "enable" : "disable", parsed.data.challengeId, parsed.data.otp);
+  user.preferences.twoFactorEnabled = enable;
+  user.preferences.twoFactorPhone = enable ? challenge.phone : undefined;
+  user.preferences.twoFactorVerifiedAt = enable ? nowIso() : undefined;
+  delete user.preferences.twoFactorOtpHash;
+  delete user.preferences.twoFactorOtpExpiresAt;
+  user.sessionVersion = (user.sessionVersion ?? 0) + 1;
+  db.pairSessions = db.pairSessions.filter(session => session.userId !== user.id);
+  user.updatedAt = nowIso();
+  await saveDb(db);
+  sendVerifiedSession(res, user, false);
 });
 
-app.post("/api/auth/disable-2fa", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
-  try {
-    const db = await loadDb();
-    const user = db.users.find((entry) => entry.id === req.auth!.userId);
-    if (!user) {
-      res.status(404).json({ error: "User not found" });
-      return;
-    }
-
-    user.preferences.twoFactorEnabled = false;
-    user.preferences.twoFactorOtpHash = undefined;
-    user.preferences.twoFactorOtpExpiresAt = undefined;
-    user.updatedAt = nowIso();
-    await saveDb(db);
-
-    res.json({
-      success: true,
-      message: "Two-factor authentication disabled.",
-      user: userResponse(user),
-    });
-  } catch (error) {
-    console.error("Disable 2FA error:", error);
-    res.status(500).json({ error: "Unable to disable 2FA right now." });
-  }
+app.post("/api/auth/login/verify-otp", authLimiter, async (req, res) => {
+  const parsed = twoFactorVerifySchema.safeParse(req.body);
+  if (!parsed.success) throw new HttpError(400, "Enter the numeric code from your text message.");
+  const db = await loadDb();
+  const user = db.users.find(entry => entry.smsChallenge?.id === parsed.data.challengeId);
+  if (!user?.preferences.twoFactorEnabled) throw new HttpError(400, "This verification has expired. Sign in again.");
+  const challenge = await checkSms(user, "login", parsed.data.challengeId, parsed.data.otp);
+  refreshUserPlan(user);
+  await saveDb(db);
+  sendVerifiedSession(res, user, challenge.rememberMe);
 });
 
 app.get("/api/auth/me", requireAuth, async (req: AuthenticatedRequest, res) => {
@@ -1526,6 +1465,9 @@ app.post("/api/billing/subscribe", requireAuth, requireCsrf, async (req: Authent
 
 app.post("/api/pair-sessions", requireAuth, requireCsrf, async (req: AuthenticatedRequest, res) => {
   const db = await loadDb();
+  if (db.users.find(user => user.id === req.auth!.userId)?.preferences.twoFactorEnabled) {
+    throw new HttpError(403, "Sign in with your password and SMS code on the new device.");
+  }
   db.pairSessions = db.pairSessions.filter((session) => !isPairSessionExpired(session));
   const appBaseUrl = getAppBaseUrl(req);
 
@@ -1584,6 +1526,8 @@ app.post("/api/pair-sessions/:code/claim", async (req, res) => {
     res.status(404).json({ error: "Account not found" });
     return;
   }
+
+  if (user.preferences.twoFactorEnabled) throw new HttpError(403, "Sign in with your password and SMS code on this device.");
 
   const timestamp = nowIso();
   let device = db.devices.find(
@@ -2741,7 +2685,7 @@ const getTransferDownloadLink = async (
     params.set(
       "token",
       signScopedToken(
-        { sub: userId, fileId: transfer.id, version: db.users.find(user => user.id === userId)?.sessionVersion ?? 0 },
+        { sub: userId, fileId: transfer.id, mfa: req.auth!.mfa, version: db.users.find(user => user.id === userId)?.sessionVersion ?? 0 },
         "download",
         `${appConfig.downloadTokenTtlHours}h`,
       ).token,

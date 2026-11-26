@@ -22,6 +22,7 @@ export interface AuthenticatedRequest extends Request {
     userId: string;
     role: "user" | "admin";
     jti: string;
+    mfa: boolean;
   };
 }
 
@@ -50,9 +51,9 @@ export const signToken = (user: UserRecord, rememberMe = false) =>
     rememberMe ? REMEMBER_ME_TOKEN_EXPIRES_IN : ACCESS_TOKEN_EXPIRES_IN,
   ).token;
 
-export const signAuthToken = (user: UserRecord, rememberMe = false) =>
+export const signAuthToken = (user: UserRecord, rememberMe = false, mfa = false) =>
   signJwt(
-    { sub: user.id, role: user.role || "user", typ: "access", version: user.sessionVersion ?? 0 },
+    { sub: user.id, mfa, role: user.role || "user", typ: "access", version: user.sessionVersion ?? 0 },
     rememberMe ? REMEMBER_ME_TOKEN_EXPIRES_IN : ACCESS_TOKEN_EXPIRES_IN,
   );
 
@@ -88,7 +89,7 @@ export const verifyScopedToken = async (token: string, tokenKind: TokenKind) => 
   });
   const owner = db.users.find(user => user.id === payload.sub);
   if (!owner || (payload.version ?? 0) !== (owner.sessionVersion ?? 0) ||
-      (appConfig.isProduction && owner.preferences.twoFactorEnabled)) {
+      (owner.preferences.twoFactorEnabled && payload.mfa !== true)) {
     throw new Error("Session requires reauthentication");
   }
   return payload;
@@ -210,6 +211,7 @@ export const requireAuth = async (
       userId: String(payload.sub),
       role: payload.role === "admin" ? "admin" : "user",
       jti: String(payload.jti),
+      mfa: payload.mfa === true,
     };
     next();
   } catch (error) {

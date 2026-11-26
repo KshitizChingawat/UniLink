@@ -16,14 +16,26 @@ interface User {
   subscriptionExpiresAt?: string;
   twoFactorEnabled?: boolean;
   twoFactorPhone?: string;
+  smsVerificationAvailable?: boolean;
+}
+
+export interface SmsChallenge {
+  challengeId: string;
+  maskedPhone: string;
+}
+export interface AuthSession {
+  token: string;
+  user: User;
 }
 
 interface AuthContextValue {
+  acceptSession: (session: AuthSession) => void;
+  finishSmsLogin: (challengeId: string, otp: string, rememberMe: boolean) => Promise<void>;
   user: User | null;
   loading: boolean;
   sessionUnavailable: boolean;
   retrySession: () => void;
-  signIn: (email: string, password: string, rememberMe?: boolean) => Promise<{ error: Error | null; shouldRedirect?: boolean }>;
+  signIn: (email: string, password: string, rememberMe?: boolean) => Promise<{ error: Error | null; shouldRedirect?: boolean; challenge?: SmsChallenge }>;
   signUp: (email: string, password: string, firstName: string, lastName: string, otp: string) => Promise<{ error: Error | null }>;
   requestRegistrationOtp: (email: string) => Promise<{ error: Error | null; developmentOtp?: string | null; deliveryMode?: "email" | "fallback" | null }>;
   verifyRegistrationOtp: (email: string, otp: string) => Promise<{ error: Error | null }>;
@@ -146,19 +158,33 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     localStorage.removeItem("remember-me");
   };
 
+  const acceptSession = (session: AuthSession) => {
+    setSessionUnavailable(false);
+    localStorage.setItem("auth_token", session.token);
+    localStorage.setItem("user_data", JSON.stringify(session.user));
+    setUser(session.user);
+  };
+
+  const finishSmsLogin = async (challengeId: string, otp: string, rememberMe: boolean) => {
+    const session = await apiFetch<AuthSession>("/api/auth/login/verify-otp", {
+      method: "POST", body: JSON.stringify({ challengeId, otp }),
+    });
+    acceptSession(session);
+    persistRememberedEmail(session.user.email, rememberMe);
+    navigate("/dashboard");
+  };
+
   const signIn = async (email: string, password: string, rememberMe: boolean = false) => {
     const normalizedEmail = email.trim().toLowerCase();
     try {
-      const data = await apiFetch<{ token: string; user: User }>("/api/auth/login", {
+      const data = await apiFetch<AuthSession | SmsChallenge>("/api/auth/login", {
         method: "POST",
         body: JSON.stringify({ email: normalizedEmail, password, rememberMe }),
       });
 
-      setSessionUnavailable(false);
-      localStorage.setItem("auth_token", data.token);
-      localStorage.setItem("user_data", JSON.stringify(data.user));
+      if ("challengeId" in data) return { error: null, challenge: data };
+      acceptSession(data);
       persistRememberedEmail(normalizedEmail, rememberMe);
-      setUser(data.user);
       setTimeout(() => navigate("/dashboard"), 100);
       return { error: null };
     } catch (err) {
@@ -434,6 +460,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       user,
       loading,
       sessionUnavailable,
+      acceptSession,
+      finishSmsLogin,
       retrySession: () => setSessionAttempt(attempt => attempt + 1),
       signIn,
       signUp,

@@ -25,7 +25,7 @@ const signJwt = (payload, expiresIn) => {
     };
 };
 export const signToken = (user, rememberMe = false) => signJwt({ sub: user.id, role: user.role || "user", typ: "access", version: user.sessionVersion ?? 0 }, rememberMe ? REMEMBER_ME_TOKEN_EXPIRES_IN : ACCESS_TOKEN_EXPIRES_IN).token;
-export const signAuthToken = (user, rememberMe = false) => signJwt({ sub: user.id, role: user.role || "user", typ: "access", version: user.sessionVersion ?? 0 }, rememberMe ? REMEMBER_ME_TOKEN_EXPIRES_IN : ACCESS_TOKEN_EXPIRES_IN);
+export const signAuthToken = (user, rememberMe = false, mfa = false) => signJwt({ sub: user.id, mfa, role: user.role || "user", typ: "access", version: user.sessionVersion ?? 0 }, rememberMe ? REMEMBER_ME_TOKEN_EXPIRES_IN : ACCESS_TOKEN_EXPIRES_IN);
 export const signScopedToken = (payload, tokenKind, expiresIn) => signJwt({ ...payload, typ: tokenKind }, expiresIn);
 export const revokeToken = async (jti, reason = "manual") => {
     const { error } = await supabase.from(revokedTokenTable).insert({ jti, reason });
@@ -52,7 +52,7 @@ export const verifyScopedToken = async (token, tokenKind) => {
     });
     const owner = db.users.find(user => user.id === payload.sub);
     if (!owner || (payload.version ?? 0) !== (owner.sessionVersion ?? 0) ||
-        (appConfig.isProduction && owner.preferences.twoFactorEnabled)) {
+        (owner.preferences.twoFactorEnabled && payload.mfa !== true)) {
         throw new Error("Session requires reauthentication");
     }
     return payload;
@@ -153,6 +153,7 @@ export const requireAuth = async (req, res, next) => {
             userId: String(payload.sub),
             role: payload.role === "admin" ? "admin" : "user",
             jti: String(payload.jti),
+            mfa: payload.mfa === true,
         };
         next();
     }

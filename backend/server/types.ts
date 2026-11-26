@@ -5,6 +5,7 @@ export interface UserRecord {
   lastName: string;
   passwordHash: string;
   sessionVersion?: number;
+  smsChallenge?: import("./sms.js").SmsChallenge;
   role?: "user" | "admin";
   createdAt: string;
   updatedAt: string;

@@ -7,24 +7,24 @@ import { Switch } from '@/components/ui/switch';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Shield, Lock, Key, AlertTriangle, CheckCircle, Wifi, Smartphone } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import { useAuth } from '@/hooks/useAuth';
+import { useState } from 'react';
+import { useAuth, type AuthSession, type SmsChallenge } from '@/hooks/useAuth';
 import { useDevices } from '@/hooks/useDevices';
 import { toast } from 'sonner';
 import { apiFetch } from '@/lib/api';
 
 const SecurityPage = () => {
-  const { user } = useAuth();
+  const { user, acceptSession } = useAuth();
   const { devices, removeDevice, updateDeviceStatus } = useDevices();
   const [encryptionEnabled, setEncryptionEnabled] = useState(true);
-  const [twoFactorEnabled, setTwoFactorEnabled] = useState(Boolean(user?.twoFactorEnabled));
+  const twoFactorEnabled = Boolean(user?.twoFactorEnabled);
   const [autoLockEnabled, setAutoLockEnabled] = useState(true);
   const [secureTransferEnabled, setSecureTransferEnabled] = useState(true);
   const [mobileNumber, setMobileNumber] = useState(user?.twoFactorPhone || '');
   const [enteredOtp, setEnteredOtp] = useState('');
-  const [generatedOtp, setGeneratedOtp] = useState('');
-  const [sendingOtp, setSendingOtp] = useState(false);
-  const [verifyingOtp, setVerifyingOtp] = useState(false);
+  const [challenge, setChallenge] = useState<SmsChallenge | null>(null);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [verifying, setVerifying] = useState(false);
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
   const [changingPassword, setChangingPassword] = useState(false);
   const [passwordForm, setPasswordForm] = useState({
@@ -32,11 +32,6 @@ const SecurityPage = () => {
     newPassword: '',
     confirmPassword: '',
   });
-
-  useEffect(() => {
-    setTwoFactorEnabled(Boolean(user?.twoFactorEnabled));
-    setMobileNumber(user?.twoFactorPhone || '');
-  }, [user?.twoFactorEnabled, user?.twoFactorPhone]);
 
   const securityScore = () => {
     let score = 0;
@@ -59,66 +54,31 @@ const SecurityPage = () => {
     return 'Needs Improvement';
   };
 
-  const handleTwoFactorToggle = async (enabled: boolean) => {
-    if (!enabled) {
-      try {
-        const data = await apiFetch<{ message: string }>('/api/auth/disable-2fa', {
-          method: 'POST',
+  const submitVerification = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (verifying) return;
+    setVerifying(true);
+    try {
+      if (challenge) {
+        const session = await apiFetch<AuthSession>('/api/auth/verify-2fa-otp', {
+          method: 'POST', body: JSON.stringify({ challengeId: challenge.challengeId, otp: enteredOtp }),
         });
-        setTwoFactorEnabled(false);
+        acceptSession(session);
+        setChallenge(null);
         setEnteredOtp('');
-        setGeneratedOtp('');
-        toast.success(data.message);
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : 'Unable to disable two-factor authentication.');
+        setMobileNumber(session.user.twoFactorPhone ?? '');
+        toast.success(session.user.twoFactorEnabled ? 'SMS two-factor authentication is on.' : 'SMS two-factor authentication is off.');
+      } else {
+        const next = await apiFetch<SmsChallenge>('/api/auth/request-2fa-otp', {
+          method: 'POST', body: JSON.stringify({ mobileNumber, currentPassword, purpose: twoFactorEnabled ? 'disable' : 'enable' }),
+        });
+        setChallenge(next);
+        setCurrentPassword('');
       }
-      return;
-    }
-
-    setTwoFactorEnabled(false);
-  };
-
-  const sendOtp = async () => {
-    if (!mobileNumber.trim()) {
-      toast.error('Enter a mobile number first.');
-      return;
-    }
-
-    setSendingOtp(true);
-    try {
-      const data = await apiFetch<{ message: string; developmentOtp?: string }>('/api/auth/request-2fa-otp', {
-        method: 'POST',
-        body: JSON.stringify({ mobileNumber }),
-      });
-      setGeneratedOtp(data.developmentOtp || '');
-      toast.success(data.message);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Unable to send OTP.');
+      toast.error(error instanceof Error ? error.message : 'SMS verification failed.');
     } finally {
-      setSendingOtp(false);
-    }
-  };
-
-  const verifyOtp = async () => {
-    if (enteredOtp.trim().length !== 6) {
-      toast.error('Enter the 6-digit OTP.');
-      return;
-    }
-
-    setVerifyingOtp(true);
-    try {
-      const data = await apiFetch<{ message: string }>('/api/auth/verify-2fa-otp', {
-        method: 'POST',
-        body: JSON.stringify({ otp: enteredOtp.trim() }),
-      });
-      setTwoFactorEnabled(true);
-      setGeneratedOtp('');
-      setEnteredOtp('');
-      toast.success(data.message);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Invalid OTP. Please try again.');
-    } finally {
-      setVerifyingOtp(false);
+      setVerifying(false);
     }
   };
 
@@ -255,53 +215,37 @@ const SecurityPage = () => {
                 <CardDescription>Secure your account access</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h4 className="font-medium">Two-Factor Authentication</h4>
-                    <p className="text-sm text-muted-foreground">
-                      Add an extra layer of security
-                    </p>
-                  </div>
-                  <Switch
-                    checked={twoFactorEnabled}
-                    onCheckedChange={handleTwoFactorToggle}
-                  />
+                <div className="flex items-center justify-between gap-3">
+                  <h4 className="font-medium">SMS two-factor authentication</h4>
+                  <Badge variant={twoFactorEnabled ? 'default' : 'secondary'}>{twoFactorEnabled ? 'On' : 'Off'}</Badge>
                 </div>
-
-                {!twoFactorEnabled && (
-                  <div className="space-y-3 rounded-xl border border-slate-200 p-4">
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">Mobile Number</label>
-                      <Input
-                        placeholder="+91 1234-123456"
-                        value={mobileNumber}
-                        onChange={(e) => setMobileNumber(e.target.value)}
-                      />
-                    </div>
-                    <div className="flex gap-2">
-                      <Button type="button" variant="outline" onClick={sendOtp} disabled={sendingOtp}>
-                        {sendingOtp ? 'Sending OTP...' : 'Send OTP'}
-                      </Button>
-                      <Input
-                        placeholder="Enter OTP"
-                        value={enteredOtp}
-                        onChange={(e) => setEnteredOtp(e.target.value)}
-                      />
-                      <Button type="button" onClick={verifyOtp} disabled={verifyingOtp || enteredOtp.trim().length !== 6}>
-                        {verifyingOtp ? 'Verifying...' : 'Verify'}
-                      </Button>
-                    </div>
-                    {generatedOtp && (
-                      <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                        <p className="font-medium">Temporary OTP</p>
-                        <p className="mt-1">Use this code while SMS integration is not connected yet:</p>
-                        <div className="mt-2 rounded-md bg-white px-3 py-2 text-base font-bold tracking-[0.35em] text-amber-700">
-                          {generatedOtp}
-                        </div>
-                      </div>
-                    )}
+                <p className="text-sm text-muted-foreground">
+                  At sign-in, enter your password and then a code sent to your verified phone.
+                  Someone who knows your password still needs that code to open your workspace.
+                </p>
+                {user?.smsVerificationAvailable ? <form className="space-y-3" onSubmit={submitVerification}>
+                  {challenge ? <>
+                    <label htmlFor="security-otp" className="text-sm font-medium" aria-live="polite">Enter the code sent to {challenge.maskedPhone}</label>
+                    <Input id="security-otp" autoFocus inputMode="numeric" autoComplete="one-time-code" maxLength={10} pattern="[0-9]{4,10}" required
+                      value={enteredOtp} onChange={e => setEnteredOtp(e.target.value.replace(/\D/g, ''))} />
+                  </> : <>
+                    {twoFactorEnabled ? <p className="text-sm">Verified phone ending in {user.twoFactorPhone?.slice(-4)}</p> : <>
+                      <label htmlFor="security-phone" className="text-sm font-medium">Mobile number with country code</label>
+                      <Input id="security-phone" type="tel" autoComplete="tel" placeholder="+91 98765 43210" required
+                        value={mobileNumber} onChange={e => setMobileNumber(e.target.value)} />
+                    </>}
+                    <label htmlFor="security-password" className="text-sm font-medium">Current password</label>
+                    <Input id="security-password" type="password" autoComplete="current-password" required
+                      value={currentPassword} onChange={e => setCurrentPassword(e.target.value)} />
+                  </>}
+                  <div className="flex flex-wrap gap-2">
+                    <Button disabled={verifying}>{verifying ? 'Please wait…' : challenge
+                      ? (twoFactorEnabled ? 'Verify and turn off' : 'Verify and turn on')
+                      : (twoFactorEnabled ? 'Send code to turn off' : 'Send verification code')}</Button>
+                    {challenge && <Button type="button" variant="outline" disabled={verifying}
+                      onClick={() => { setChallenge(null); setEnteredOtp(''); }}>Start again</Button>}
                   </div>
-                )}
+                </form> : <p className="rounded-lg border p-3 text-sm" role="status">SMS delivery is unavailable. Your UniLink administrator can enable it in the backend settings.</p>}
 
                 <div className="pt-4 border-t">
                   <h4 className="font-medium mb-2">Account Information</h4>

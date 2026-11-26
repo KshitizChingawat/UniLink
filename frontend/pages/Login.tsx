@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Eye, EyeOff } from 'lucide-react';
-import { useAuth } from '@/hooks/useAuth';
+import { useAuth, type SmsChallenge } from '@/hooks/useAuth';
 import Logo from '@/components/Logo';
 import AnimatedToggle from '@/components/ui/animated-toggle';
 import GenerativeArtSceneV3 from '@/components/ui/quantum-nebula';
@@ -31,7 +31,9 @@ const Login = () => {
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showConfirmNewPassword, setShowConfirmNewPassword] = useState(false);
-  const { signIn, requestPasswordReset, resetPassword } = useAuth();
+  const [challenge, setChallenge] = useState<SmsChallenge | null>(null);
+  const [smsCode, setSmsCode] = useState('');
+  const { signIn, finishSmsLogin, requestPasswordReset, resetPassword } = useAuth();
   const normalizedEmail = email.trim().toLowerCase();
   const emailLooksValid = !email || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail);
 
@@ -45,7 +47,11 @@ const Login = () => {
     setLoading(true);
     try {
       const result = await signIn(submittedEmail, submittedPassword, rememberMe);
-      if (!result.error) setConnected(true);
+      if (result.challenge) {
+        setEmail(submittedEmail);
+        setChallenge(result.challenge);
+        setHasPassword(false);
+      } else if (!result.error) setConnected(true);
     } finally {
       setLoading(false);
     }
@@ -143,11 +149,29 @@ const Login = () => {
               <Logo size="md" showText={false} />
             </div>
             
-            <h1 id="auth-title" className="text-[1.55rem] font-black leading-tight text-white sm:text-[2rem]">Welcome back</h1>
-            <p className="mt-1 text-sm font-medium text-slate-300 sm:mt-1.5 sm:text-[15px]">Sign in to your UniLink account</p>
+            <h1 id="auth-title" className="text-[1.55rem] font-black leading-tight text-white sm:text-[2rem]">{challenge ? 'Check your phone' : 'Welcome back'}</h1>
+            <p className="mt-1 text-sm font-medium text-slate-300 sm:mt-1.5 sm:text-[15px]">{challenge ? 'Enter the SMS code sent to ' + challenge.maskedPhone : 'Sign in to your UniLink account'}</p>
           </div>
 
-          <form ref={formRef} onSubmit={handleSubmit} className="space-y-3 sm:space-y-4">
+          {challenge ? <form className="space-y-4 text-white" onSubmit={async event => {
+            event.preventDefault();
+            if (loading) return;
+            setLoading(true);
+            try {
+              await finishSmsLogin(challenge.challengeId, smsCode, rememberMe);
+            } catch (error) {
+              toast.error(error instanceof Error ? error.message : 'Verification failed.');
+            } finally {
+              setLoading(false);
+            }
+          }}>
+            <Label htmlFor="login-sms">SMS verification code</Label>
+            <Input id="login-sms" className="bg-white/5" autoFocus autoComplete="one-time-code" inputMode="numeric"
+              pattern="[0-9]{4,10}" maxLength={10} required value={smsCode} onChange={e => setSmsCode(e.target.value.replace(/\D/g, ''))} />
+            <Button className="w-full" disabled={loading}>{loading ? 'Verifying…' : 'Verify and sign in'}</Button>
+            <button type="button" className="w-full text-sm text-sky-300" disabled={loading}
+              onClick={() => { setChallenge(null); setSmsCode(''); }}>Back to password to request another code</button>
+          </form> : <form ref={formRef} onSubmit={handleSubmit} className="space-y-3 sm:space-y-4">
             <div>
               <Label htmlFor="email" className="text-slate-300">Email address</Label>
               <Input
@@ -156,7 +180,7 @@ const Login = () => {
                 name="email"
                 autoCapitalize="none"
                 spellCheck={false}
-                defaultValue={localStorage.getItem('remembered_email') || ''}
+                defaultValue={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="Enter your email"
                 className="mt-1 bg-white/5 border border-white/20 placeholder:text-slate-500/50 focus:border-sky-400/50 text-white disabled:cursor-not-allowed md:text-sm"
@@ -225,7 +249,7 @@ const Login = () => {
                 className="mx-auto w-full gap-2 sm:gap-2.5"
               />
             </div>
-          </form>
+          </form>}
 
           <div className="mt-3.5 text-center sm:mt-4">
             <p className="text-sm text-gray-300 sm:text-base">

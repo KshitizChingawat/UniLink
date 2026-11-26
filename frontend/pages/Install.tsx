@@ -25,11 +25,11 @@ const iosReleaseUrl = (import.meta.env.VITE_IOS_INSTALL_URL ?? '').trim();
 const hasIosRelease = /^https:\/\/(?:testflight\.apple\.com\/join\/[A-Za-z0-9]+|apps\.apple\.com\/[^\s]+)$/.test(iosReleaseUrl);
 
 function installGuide(device: Device) {
-  if (device === 'ios') return { title: 'UniLink for iPhone and iPad', steps: hasIosRelease ? [
-    'Open the Apple distribution link on your iPhone or iPad.',
-    'Follow the prompts in TestFlight or the App Store to install UniLink.',
-    'Launch UniLink from your App Library. To uninstall it, touch and hold its icon and choose Delete App.',
-  ] : [] };
+  if (device === 'ios') return { title: 'Add UniLink to your Home Screen', steps: [
+    'Open UniLink in Safari on your iPhone or iPad.',
+    'Tap Share in the toolbar or page menu, then choose Add to Home Screen. If it’s hidden, scroll down to Edit Actions.',
+    'Turn on Open as Web App if shown, then tap Add. Tap the UniLink icon to open your workspace.',
+  ] };
   if (device === 'android') return { title: 'UniLink for Android', steps: [
     'Download the signed UniLink APK on your Android phone or tablet.',
     'Open UniLink.apk from Downloads and tap Install. If Android asks, allow this browser to install this app.',
@@ -56,7 +56,7 @@ function Install() {
   const [feedback, setFeedback] = useState('');
   const { canPrompt, installed, standalone } = useAppInstall();
   const native = /\bUniLinkNative\/1\b/.test(navigator.userAgent);
-  const ready = native || ((installed || standalone) && selected === 'desktop');
+  const ready = native || (standalone && selected === device) || (installed && selected === 'desktop' && device === 'desktop');
   const guide = installGuide(selected);
   const showQR = device === 'desktop' && location.protocol === 'https:' && !standalone && !native;
 
@@ -107,11 +107,6 @@ function Install() {
                   {selected === 'android' && <Button asChild size="lg" className="mt-4 w-full sm:w-auto">
                     <a href="/downloads/UniLink.apk" download="UniLink.apk"><Download />Download UniLink APK</a>
                   </Button>}
-                  {selected === 'ios' && (hasIosRelease ? <Button asChild size="lg" className="mt-4">
-                    <a href={iosReleaseUrl}>Get the iOS app<ArrowRight /></a>
-                  </Button> : <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                    The iOS app is awaiting a signed release. For now, use UniLink in Safari. To add the web version to your Home Screen, tap Share, then Add to Home Screen.
-                  </p>)}
                   {selected === 'desktop' && selected === device && canPrompt && <Button size="lg" className="mt-4 w-full sm:w-auto" onClick={install}><Download />Install on this device</Button>}
                   <p className="mt-3 text-sm text-muted-foreground" role="status">{feedback}</p>
                   {guide.steps.length > 0 && <ol className="mt-4 space-y-4">
@@ -120,6 +115,9 @@ function Install() {
                       <span className="pt-0.5 text-sm leading-6 text-slate-700 dark:text-slate-200">{step}</span>
                     </li>)}
                   </ol>}
+                  {selected === 'ios' && hasIosRelease && <Button asChild variant="outline" className="mt-5">
+                    <a href={iosReleaseUrl}>{iosReleaseUrl.startsWith('https://testflight.') ? 'Install with TestFlight' : 'View on the App Store'}<ArrowRight /></a>
+                  </Button>}
                 </TabsContent>
               </Tabs>
               <p className="mt-7 border-t pt-4 text-sm leading-relaxed text-muted-foreground">

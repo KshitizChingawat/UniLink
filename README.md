@@ -23,7 +23,7 @@ All across platforms like **Windows, macOS, Linux, Android, iOS, and browsers**.
 
 ## Install UniLink
 
-Open `/install` on the website. On Android 8 or later, choose **Download UniLink APK** and open the file to install the app. Android lists UniLink in Settings → Apps, where it can be uninstalled. On desktop, the browser installation option is available. On iPhone and iPad, the website offers Safari home-screen access until an Apple-signed native distribution link is configured.
+Open `/install` on the website. On Android 8 or later, choose **Download UniLink APK** and open the file to install the app. Android lists UniLink in Settings → Apps, where it can be uninstalled. On desktop, the browser installation option is available. On iPhone and iPad, open UniLink in Safari, choose Share → Add to Home Screen, enable Open as Web App if shown, and tap Add. A configured App Store or TestFlight release also appears in the iOS tab.
 
 The native clients open the hosted UniLink workspace and use your existing account. Android release signing and iOS build instructions are in [the mobile guide](mobile/README.md).
 
@@ -151,8 +151,10 @@ Use Node 22.9 or newer and run the build and start commands from the repository 
 
 Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and `SMTP_FROM` in the Render service environment. Use a sender authorized by your mail provider. For Mailtrap Email Sending, a Mailtrap SMTP hostname with username `api` selects the HTTPS delivery path. Signup and password recovery require email delivery in production. Codes expire after ten minutes, and resending replaces the previous code.
 
+For SMS two-factor authentication, create a Twilio Verify service with SMS enabled for the countries you serve. Set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_VERIFY_SERVICE_SID` in the backend environment. In Dashboard → Security → Authentication, enter a mobile number with its country code, confirm your password, and enter the code sent by text. Subsequent password sign-ins require a text to that verified number. To turn it off, confirm your current password and a text sent to the same number.
+
 After deploying, register with an inbox you control, sign out, sign in again, and complete password recovery using the new email code. Keep service credentials in Render environment settings.
 
 ### Production storage and authentication
 
-Apply `backend/revoked_tokens.sql` to the Supabase project before starting the service. Keep the account database, file, and session buckets private and restrict object access to the backend service role. Production startup checks the bucket visibility and revocation table. Deploy a single backend instance while the account database uses object storage and an in-process write lock. Configure the exact HTTPS frontend origin in `ALLOWED_ORIGINS` and `APP_BASE_URL`. Phone verification and subscription activation require real provider integrations before they can be enabled in production.
+Apply `backend/revoked_tokens.sql` to the Supabase project before starting the service. Keep the account database, file, and session buckets private and restrict object access to the backend service role. Production startup checks the bucket visibility and revocation table. Deploy a single backend instance while the account database uses object storage and an in-process write lock. Configure the exact HTTPS frontend origin in `ALLOWED_ORIGINS` and `APP_BASE_URL`. Subscription activation requires a billing provider integration.
