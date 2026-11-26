@@ -116,6 +116,13 @@ function Install() {
             </>}
           </section>
         </div>
+        <section aria-labelledby="hope-download" className="mt-6 flex flex-wrap items-center justify-between gap-4 rounded-2xl border bg-card p-5 sm:p-7">
+          <div>
+            <h2 id="hope-download" className="text-xl font-semibold">Hope for Android</h2>
+            <p className="mt-1 text-sm text-muted-foreground">Android 8 or later. Connect to the Hope server after installation.</p>
+          </div>
+          <Button asChild><a href="/downloads/Hope.apk" download="Hope.apk"><Download aria-hidden="true" />Download Hope APK</a></Button>
+        </section>
       </main>
     </div>
   );
