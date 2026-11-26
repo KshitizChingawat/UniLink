@@ -26,8 +26,10 @@ const getHeuristicApiBaseUrls = () => {
 
   if (typeof window !== "undefined") {
     const currentOrigin = normalizeBaseUrl(window.location.origin);
+    if (currentOrigin === "https://unilink-frontend-omky.onrender.com") {
+      bases.add("https://unilink-backend-8tyj.onrender.com");
+    }
     if (currentOrigin) bases.add(currentOrigin);
-
 
   }
 

@@ -1,5 +1,6 @@
 import { Route, Switch } from "wouter";
 import { Toaster } from "sonner";
+import AppUpdatePrompt from "@/components/AppUpdatePrompt";
 import Index from "@/pages/Index";
 import Install from "@/pages/Install";
 import Login from "@/pages/Login";
@@ -47,6 +48,7 @@ const App = () => {
   return (
     <AuthProvider>
       <WakeUpBanner />
+      <AppUpdatePrompt />
       <Switch>
         <Route path="/" component={Index} />
         <Route path="/install" component={Install} />

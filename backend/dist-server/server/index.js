@@ -2589,7 +2589,7 @@ if (isProduction) {
         index: "index.html",
         maxAge: "1d",
         setHeaders(res, file) {
-            if (["index.html", "manifest.webmanifest", "sw.js", "offline.html"].includes(path.basename(file))) {
+            if (["index.html", "manifest.webmanifest", "release.json", "sw.js", "offline.html"].includes(path.basename(file))) {
                 res.setHeader("Cache-Control", "no-cache");
             }
         },

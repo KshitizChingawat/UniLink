@@ -21,23 +21,11 @@ def run(*args):
 
 with tempfile.TemporaryDirectory(prefix="unilink-apk-") as folder:
     build = Path(folder)
-    # Use the deployed frontend origin in WebView so the backend's existing CORS
-    # configuration applies. Only immutable app assets are bundled, never APK downloads.
-    web = build / "web"
-    api = os.environ.get("VITE_API_BASE_URL", "https://unilink-backend-8tyj.onrender.com")
-    subprocess.run(["npm", "exec", "--", "vite", "build", "--target", "chrome67",
-                    "--outDir", str(web), "--emptyOutDir"], cwd=root / "frontend",
-                   env={**os.environ, "VITE_API_BASE_URL": api}, check=True)
-    assets = build / "assets"
-    assets.mkdir()
-    shutil.copyfile(web / "index.html", assets / "index.html")
-    for directory in ["assets", "icons"]:
-        shutil.copytree(web / directory, assets / directory)
     res = build / "res/drawable-nodpi"
     res.mkdir(parents=True)
     shutil.copyfile(root / "frontend/public/icons/unilink-192.png", res / "launcher.png")
     run(tools / "aapt2", "compile", "--dir", build / "res", "-o", build / "resources.zip")
-    run(tools / "aapt2", "link", "-I", platform, "--manifest", android / "AndroidManifest.xml", "-A", assets,
+    run(tools / "aapt2", "link", "-I", platform, "--manifest", android / "AndroidManifest.xml",
         "-o", build / "app.apk", build / "resources.zip")
     classes = build / "classes"
     classes.mkdir()

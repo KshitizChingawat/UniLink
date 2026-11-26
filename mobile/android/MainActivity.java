@@ -21,8 +21,6 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
-import java.io.IOException;
-import java.io.InputStream;
 
 public final class MainActivity extends Activity {
     private static final String HOST = "unilink-frontend-omky.onrender.com";
@@ -50,33 +48,6 @@ public final class MainActivity extends Activity {
         settings.setUserAgentString(settings.getUserAgentString() + " UniLinkNative/1");
         CookieManager.getInstance().setAcceptCookie(true);
         web.setWebViewClient(new WebViewClient() {
-            @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                Uri uri = request.getUrl();
-                if (!isWorkspace(uri) || !"GET".equals(request.getMethod())) return null;
-                String path = uri.getPath();
-                if (path == null) return null;
-                String file;
-                String mime;
-                if (request.isForMainFrame() && (path.equals("/") || path.matches("/(?:dashboard|login|register|connect|install|pricing|security|support|product|terms|privacy)(?:/[^.]*)?"))) {
-                    file = "index.html";
-                    mime = "text/html";
-                } else if (path.matches("/assets/[A-Za-z0-9_.-]+\\.(js|css)")) {
-                    file = path.substring(1);
-                    mime = path.endsWith(".js") ? "application/javascript" : "text/css";
-                } else if (path.matches("/icons/[A-Za-z0-9_-]+\\.png")) {
-                    file = path.substring(1);
-                    mime = "image/png";
-                } else {
-                    return null;
-                }
-                try {
-                    InputStream bytes = getAssets().open(file);
-                    return new WebResourceResponse(mime, mime.equals("image/png") ? null : "UTF-8", bytes);
-                } catch (IOException missingFile) {
-                    return null;
-                }
-            }
-
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 if (!request.isForMainFrame() || isWorkspace(request.getUrl())) return false;
                 openExternal(request.getUrl());
@@ -86,7 +57,7 @@ public final class MainActivity extends Activity {
                 if (request.isForMainFrame()) showRetry(request.getUrl());
             }
             @Override public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
-                if (request.isForMainFrame() && response.getStatusCode() >= 500) showRetry(request.getUrl());
+                if (request.isForMainFrame() && response.getStatusCode() >= 400) showRetry(request.getUrl());
             }
         });
         web.setDownloadListener((url, ua, disposition, mime, length) -> openExternal(Uri.parse(url)));

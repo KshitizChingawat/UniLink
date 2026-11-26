@@ -7,7 +7,7 @@ import { Switch } from '@/components/ui/switch';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Shield, Lock, Key, AlertTriangle, CheckCircle, Wifi, Smartphone } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth, type AuthSession, type SmsChallenge } from '@/hooks/useAuth';
 import { useDevices } from '@/hooks/useDevices';
 import { toast } from 'sonner';
@@ -32,6 +32,37 @@ const SecurityPage = () => {
     newPassword: '',
     confirmPassword: '',
   });
+
+  const [smsStatus, setSmsStatus] = useState<'checking' | 'ready' | 'unconfigured' | 'older' | 'unreachable'>('checking');
+  const [statusAttempt, setStatusAttempt] = useState(0);
+  useEffect(() => {
+    let active = true;
+    let request: AbortController | undefined;
+    async function refresh() {
+      if (document.hidden) return;
+      request?.abort();
+      const controller = new AbortController();
+      request = controller;
+      try {
+        const { user: fresh } = await apiFetch<{ user: { smsVerificationAvailable?: boolean } }>('/api/auth/me', {
+          cache: 'no-store', signal: controller.signal,
+        });
+        if (active && !controller.signal.aborted) setSmsStatus(fresh.smsVerificationAvailable === true ? 'ready' :
+          fresh.smsVerificationAvailable === false ? 'unconfigured' : 'older');
+      } catch {
+        if (active && !controller.signal.aborted) setSmsStatus('unreachable');
+      }
+    }
+    void refresh();
+    document.addEventListener('visibilitychange', refresh);
+    window.addEventListener('online', refresh);
+    return () => {
+      active = false;
+      request?.abort();
+      document.removeEventListener('visibilitychange', refresh);
+      window.removeEventListener('online', refresh);
+    };
+  }, [statusAttempt, user?.id]);
 
   const securityScore = () => {
     let score = 0;
@@ -223,7 +254,7 @@ const SecurityPage = () => {
                   At sign-in, enter your password and then a code sent to your verified phone.
                   Someone who knows your password still needs that code to open your workspace.
                 </p>
-                {user?.smsVerificationAvailable ? <form className="space-y-3" onSubmit={submitVerification}>
+                {smsStatus === 'ready' || challenge ? <form className="space-y-3" onSubmit={submitVerification}>
                   {challenge ? <>
                     <label htmlFor="security-otp" className="text-sm font-medium" aria-live="polite">Enter the code sent to {challenge.maskedPhone}</label>
                     <Input id="security-otp" autoFocus inputMode="numeric" autoComplete="one-time-code" maxLength={10} pattern="[0-9]{4,10}" required
@@ -245,7 +276,18 @@ const SecurityPage = () => {
                     {challenge && <Button type="button" variant="outline" disabled={verifying}
                       onClick={() => { setChallenge(null); setEnteredOtp(''); }}>Start again</Button>}
                   </div>
-                </form> : <p className="rounded-lg border p-3 text-sm" role="status">SMS delivery is unavailable. Your UniLink administrator can enable it in the backend settings.</p>}
+                </form> : <div className="space-y-2 rounded-lg border p-3 text-sm">
+                  <p role="status">{{
+                    checking: 'Checking SMS availability…',
+                    unconfigured: 'The UniLink server needs its Twilio Verify credentials before it can send a text.',
+                    older: 'This server version does not report SMS support. Deploy the backend with phone verification enabled.',
+                    unreachable: 'Couldn’t check SMS availability. Reconnect and try again.',
+                  }[smsStatus]}</p>
+                  {smsStatus !== 'checking' && <Button type="button" variant="outline" onClick={() => {
+                    setSmsStatus('checking');
+                    setStatusAttempt(attempt => attempt + 1);
+                  }}>Check again</Button>}
+                </div>}
 
                 <div className="pt-4 border-t">
                   <h4 className="font-medium mb-2">Account Information</h4>
